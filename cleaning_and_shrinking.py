@@ -3,8 +3,8 @@ import os
 import pandas as pd
 
 INPUT_CSV = "2008_to_2024_cleaned.csv"
-OUTPUT_CSV = "2008_to_2024_cleaned.csv"
-TEMP_OUTPUT_CSV = "2008_to_2024_cleaned.tmp.csv"
+OUTPUT_CSV = "2008_to_2024_cleaned2.csv"
+TEMP_OUTPUT_CSV = "2008_to_2024_cleaned2.tmp.csv"
 CHUNK_SIZE = 100000
 
 rows_before_filter = 0
