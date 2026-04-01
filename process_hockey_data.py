@@ -4,7 +4,6 @@ INPUT_CSV = "2008_to_2024.csv"
 OUTPUT_CSV = "2008_to_2024_cleaned.csv"
 CHUNK_SIZE = 200_000
 
-# Rename columns to cleaner, more readable names
 rename_map = {
     "playerId": "player_id",
     "name": "player_name",
@@ -26,7 +25,6 @@ rename_map = {
     "onIce_fenwickPercentage": "on_ice_fenwick_pct",
     "offIce_fenwickPercentage": "off_ice_fenwick_pct",
     "iceTimeRank": "ice_time_rank",
-    # Individual For (I_F_) stats
     "I_F_xOnGoal": "ind_expected_on_goal",
     "I_F_xGoals": "ind_expected_goals",
     "I_F_xRebounds": "ind_expected_rebounds",
@@ -94,7 +92,6 @@ rename_map = {
     "penalityMinutesDrawn": "penalty_minutes_drawn",
     "penaltiesDrawn": "penalties_drawn",
     "shotsBlockedByPlayer": "shots_blocked_by_player",
-    # On-Ice For (OnIce_F_) stats
     "OnIce_F_xOnGoal": "on_ice_for_expected_on_goal",
     "OnIce_F_xGoals": "on_ice_for_expected_goals",
     "OnIce_F_flurryAdjustedxGoals": "on_ice_for_flurry_adj_expected_goals",
@@ -125,7 +122,6 @@ rename_map = {
     "OnIce_F_xGoals_with_earned_rebounds": "on_ice_for_expected_goals_with_earned_rebounds",
     "OnIce_F_xGoals_with_earned_rebounds_scoreAdjusted": "on_ice_for_expected_goals_earned_rebounds_score_adj",
     "OnIce_F_xGoals_with_earned_rebounds_scoreFlurryAdjusted": "on_ice_for_expected_goals_earned_rebounds_flurry_adj",
-    # On-Ice Against (OnIce_A_) stats
     "OnIce_A_xOnGoal": "on_ice_against_expected_on_goal",
     "OnIce_A_xGoals": "on_ice_against_expected_goals",
     "OnIce_A_flurryAdjustedxGoals": "on_ice_against_flurry_adj_expected_goals",
@@ -156,12 +152,10 @@ rename_map = {
     "OnIce_A_xGoals_with_earned_rebounds": "on_ice_against_expected_goals_with_earned_rebounds",
     "OnIce_A_xGoals_with_earned_rebounds_scoreAdjusted": "on_ice_against_expected_goals_earned_rebounds_score_adj",
     "OnIce_A_xGoals_with_earned_rebounds_scoreFlurryAdjusted": "on_ice_against_expected_goals_earned_rebounds_flurry_adj",
-    # Off-Ice stats
     "OffIce_F_xGoals": "off_ice_for_expected_goals",
     "OffIce_A_xGoals": "off_ice_against_expected_goals",
     "OffIce_F_shotAttempts": "off_ice_for_shot_attempts",
     "OffIce_A_shotAttempts": "off_ice_against_shot_attempts",
-    # After-shift stats
     "xGoalsForAfterShifts": "expected_goals_for_after_shifts",
     "xGoalsAgainstAfterShifts": "expected_goals_against_after_shifts",
     "corsiForAfterShifts": "corsi_for_after_shifts",
@@ -170,4 +164,10 @@ rename_map = {
     "fenwickAgainstAfterShifts": "fenwick_against_after_shifts",
 }
 
+write_header = True
+for chunk in pd.read_csv(INPUT_CSV, low_memory=False, chunksize=CHUNK_SIZE):
+    chunk.rename(columns=rename_map, inplace=True)
+    chunk.to_csv(OUTPUT_CSV, index=False, mode="w" if write_header else "a", header=write_header)
+    write_header = False
 
+print(f"Done. Saved to {OUTPUT_CSV}")
