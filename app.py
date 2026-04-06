@@ -614,3 +614,19 @@ with tab3:
         st.pyplot(make_importance_chart(fit_models, fit_feature_names))
     with st.expander("Next Season — feature importance"):
         st.pyplot(make_importance_chart(next_models, next_feature_names))
+    with st.expander("Diagnostics"):
+        st.markdown("**Next season model features:**")
+    st.write(next_feature_names)
+    st.markdown("**Age coverage:**")
+    st.write(f"Rows with age: {df['age'].notna().sum():,} / {len(df):,} ({df['age'].notna().mean()*100:.1f}%)")
+    st.markdown("**Age distribution:**")
+    fig, ax = plt.subplots(figsize=(8, 3))
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
+    df["age"].dropna().hist(ax=ax, bins=30, color="#4a90d9", edgecolor="#0e1117")
+    ax.tick_params(colors="white")
+    ax.set_xlabel("Age", color="white")
+    ax.set_ylabel("Count", color="white")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333")
+    st.pyplot(fig)
