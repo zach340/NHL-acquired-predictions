@@ -96,6 +96,21 @@ def engineer_player_features(df: pd.DataFrame) -> pd.DataFrame:
         d["ind_score_venue_adj_expected_goals_per60"], d["ind_expected_goals_per60"]
     )
 
+    # -- Full adjustment sensitivity (raw vs fully cleaned xG) ----------------
+    # How much a player's xG changes once flurry + score state + venue removed
+    # High = genuine producer; low = numbers inflate from context
+    d["full_adj_sensitivity"] = safe_div(
+        d["ind_flurry_score_venue_adj_expected_goals_per60"],
+        d["ind_expected_goals_per60"],
+        fill=1.0,
+    )
+
+    # -- Finishing skill on fully adjusted xG (cleanest finishing signal) ------
+    d["finishing_skill_adj"] = safe_div(
+        d["ind_goals_per60"],
+        d["ind_flurry_score_venue_adj_expected_goals_per60"],
+    )
+
     # -- Deployment proxy: TOI per game ---------------------------------------
     d["toi_per_game"] = d["ice_time"] / d["games_played"]
 
@@ -104,21 +119,32 @@ def engineer_player_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_team_context(df: pd.DataFrame) -> pd.DataFrame:
     """
-    For each (team, season), aggregate context features that capture:
+    For each (team, season, position), aggregate context features that capture:
       - how much ice time the team grants by position
-      - the team's offensive style
+      - the team's offensive style using fully adjusted xG
     """
     team_ctx = (
         df.groupby(["player_team", "season", "position"])
         .agg(
-            team_median_toi_pg    = ("toi_per_game",                  "median"),
-            team_avg_hd_share     = ("hd_shot_share",                 "mean"),
-            team_avg_xg_per60     = ("ind_expected_goals_per60",      "mean"),
-            team_avg_primary_rate = ("primary_assist_share",          "mean"),
-            team_avg_on_target    = ("on_target_rate",                "mean"),
+            team_median_toi_pg    = ("toi_per_game",                                    "median"),
+            team_avg_hd_share     = ("hd_shot_share",                                   "mean"),
+            # Fully adjusted xG — removes flurry, score state, and venue bias
+            team_avg_adj_xg_per60 = ("ind_flurry_score_venue_adj_expected_goals_per60", "mean"),
+            # Raw xG for computing the adjustment ratio below
+            _team_avg_raw_xg      = ("ind_expected_goals_per60",                        "mean"),
+            team_avg_primary_rate = ("primary_assist_share",                            "mean"),
+            team_avg_on_target    = ("on_target_rate",                                  "mean"),
         )
         .reset_index()
     )
+    # Ratio: how much the team's raw xG shrinks once fully adjusted
+    # Low ratio = team's numbers are inflated by score/venue/flurry effects
+    team_ctx["team_adj_ratio"] = safe_div(
+        team_ctx["team_avg_adj_xg_per60"],
+        team_ctx["_team_avg_raw_xg"],
+        fill=1.0,
+    )
+    team_ctx = team_ctx.drop(columns=["_team_avg_raw_xg"])
     return team_ctx
 
 
@@ -130,6 +156,7 @@ def merge_team_context(df: pd.DataFrame, team_ctx: pd.DataFrame) -> pd.DataFrame
 
 PLAYER_FEATURES = [
     "finishing_skill",
+    "finishing_skill_adj",          # goals/60 ÷ flurry+score+venue adj xG
     "flurry_reliance",
     "hd_shot_share",
     "hd_finishing",
@@ -139,10 +166,12 @@ PLAYER_FEATURES = [
     "xg_per_attempt",
     "on_target_rate",
     "context_sensitivity",
+    "full_adj_sensitivity",         # flurry+score+venue adj xG ÷ raw xG
     "toi_per_game",
     "shifts_per60",
     # raw volume features
     "ind_expected_goals_per60",
+    "ind_flurry_score_venue_adj_expected_goals_per60",  # cleanest individual xG
     "ind_shots_on_goal_per60",
     "ind_shot_attempts_per60",
     "ind_primary_assists_per60",
@@ -155,7 +184,8 @@ PLAYER_FEATURES = [
 TEAM_FEATURES = [
     "team_median_toi_pg",
     "team_avg_hd_share",
-    "team_avg_xg_per60",
+    "team_avg_adj_xg_per60",   # flurry + score state + venue adjusted
+    "team_adj_ratio",           # how much raw xG shrinks after adjustment
     "team_avg_primary_rate",
     "team_avg_on_target",
 ]
