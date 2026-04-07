@@ -17,7 +17,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import streamlit as st
-from sklearn.ensemble import GradientBoostingRegressor
+import lightgbm as lgb
 from sklearn.model_selection import KFold
 from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -32,7 +32,7 @@ DATA_FILE      = "offensive_performance_by_season_per60_renamed.csv"
 AGES_FILE      = "player_ages.csv"
 PP_FILE        = "pp_features.csv"
 LINEMATE_FILE  = "linemate_features.csv"
-CACHE_FILE     = "trained_models.joblib"
+CACHE_FILE     = "trained_models_forwards_v5.joblib"
 TARGETS        = ["game_score_per_game", "points_per_game", "goals_per_game"]
 MIN_GP         = 20
 MIN_ICE        = 300
@@ -40,10 +40,55 @@ CV_FOLDS       = 3
 N_SEASONS      = 3
 SEASON_WEIGHTS = [3, 2, 1]
 
+NHL_TEAMS = [
+    "ANA", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI", "COL",
+    "DAL", "DET", "EDM", "FLA", "LAK", "MIN", "MTL", "NJD",
+    "NSH", "NYI", "NYR", "OTT", "PHI", "PIT", "SEA", "SJS",
+    "STL", "TBL", "TOR", "UTA", "VAN", "VGK", "WPG", "WSH",
+]
+
+ROLE_MIN_PPG = {
+    "elite": 0.75,
+    "top6": 0.40,
+    "bottom6": 0.20,
+    "depth": 0.00,
+}
+
+ROLE_LABELS = {
+    "elite": "Top 2 Elite",
+    "top6": "Top 6",
+    "bottom6": "Bottom 6",
+    "depth": "Depth",
+}
+
+FORWARD_POSITIONS = ["C", "L", "R"]
+
 TARGET_LABELS = {
     "game_score_per_game": "Game Score / Game",
     "points_per_game":     "Points / Game",
     "goals_per_game":      "Goals / Game",
+}
+
+ELITE_QUANTILE = 0.90
+
+BASELINE_FEATURES = {
+    "game_score_per_game": [
+        "recent_3yr_mean_gamescore_pg",
+        "career_prev_mean_gamescore_pg",
+        "prev_season_gamescore_pg",
+    ],
+    "points_per_game": [
+        "recent_3yr_mean_points_pg",
+        "career_prev_mean_points_pg",
+        "prev_season_points_pg",
+        "league_avg_points_pg",
+    ],
+    "goals_per_game": [
+        "recent_3yr_mean_goals_pg",
+        "career_prev_mean_goals_pg",
+        "prev_season_goals_pg",
+        "league_avg_goals_pg",
+    ],
 }
 
 # ── Feature lists ──────────────────────────────────────────────────────────────
@@ -72,12 +117,6 @@ PLAYER_FEATURES = [
     "career_peak_goals_pg",
     "pct_of_peak_points",
     "pct_of_peak_goals",
-    # Linemate quality features — captures line environment
-    "line_adj_xg_per60",    # fully adjusted xG rate of player's line
-    "line_xg_pct",          # line possession quality
-    "line_hd_xg_per60",     # high danger chance generation
-    "line_corsi_pct",       # shot attempt share
-    "n_distinct_lines",     # role stability — fewer lines = more settled
     # Powerplay & zone start features — key deployment signals
     "pp_icetime_pct",
     "pp_points_per60",
@@ -86,6 +125,26 @@ PLAYER_FEATURES = [
     "pp_points_share",
     "o_zone_start_pct",
     "zone_start_diff",
+    # Career history features — keep older seasons in the signal without leakage
+    "career_seasons_prior",
+    "prev_season_points_pg",
+    "prev_season_goals_pg",
+    "prev_season_gamescore_pg",
+    "career_prev_mean_points_pg",
+    "career_prev_mean_goals_pg",
+    "career_prev_mean_gamescore_pg",
+    "career_prev_peak_points_pg",
+    "career_prev_peak_goals_pg",
+    "recent_3yr_mean_points_pg",
+    "recent_3yr_mean_goals_pg",
+    "recent_3yr_mean_gamescore_pg",
+    # Explicit trend features — slope of prior seasons only
+    "recent_3yr_points_slope",
+    "recent_3yr_goals_slope",
+    "recent_3yr_gamescore_slope",
+    "career_points_slope",
+    "career_goals_slope",
+    "career_gamescore_slope",
 ]
 
 # Age features — only added when age data is available
@@ -98,6 +157,11 @@ TEAM_FEATURES = [
     "team_adj_ratio",
     "team_avg_primary_rate",
     "team_avg_on_target",
+    # Team-level line quality — swapped per team at prediction time
+    "team_avg_line_adj_xg_per60",
+    "team_avg_line_xg_pct",
+    "team_avg_line_hd_xg_per60",
+    "team_avg_line_corsi_pct",
 ]
 
 # Next-season model also uses trajectory (YoY delta) features
@@ -169,25 +233,90 @@ def engineer_trajectory_features(df):
     return d
 
 
+def engineer_career_history_features(df):
+    """Add leakage-safe career history features based on prior seasons only."""
+    d = df.sort_values(["player_id", "season"]).copy()
+
+    def prior_slope(s, window=None):
+        vals = s.shift(1).values
+        out = np.full(len(vals), np.nan)
+        for i in range(len(vals)):
+            start = 0 if window is None else max(0, i - window + 1)
+            win = vals[start:i + 1]
+            mask = ~np.isnan(win)
+            if mask.sum() < 2:
+                continue
+            y = win[mask]
+            x = np.arange(len(win))[mask].astype(float)
+            x_mean = x.mean()
+            y_mean = y.mean()
+            denom = ((x - x_mean) ** 2).sum()
+            out[i] = 0.0 if denom == 0 else float(((x - x_mean) * (y - y_mean)).sum() / denom)
+        return pd.Series(out, index=s.index)
+
+    grouped = d.groupby("player_id", sort=False)
+    d["career_seasons_prior"] = grouped.cumcount().astype(float)
+
+    d["prev_season_points_pg"] = grouped["points_per_game"].shift(1)
+    d["prev_season_goals_pg"] = grouped["goals_per_game"].shift(1)
+    d["prev_season_gamescore_pg"] = grouped["game_score_per_game"].shift(1)
+
+    d["career_prev_mean_points_pg"] = grouped["points_per_game"].apply(lambda s: s.shift(1).expanding().mean()).reset_index(level=0, drop=True)
+    d["career_prev_mean_goals_pg"] = grouped["goals_per_game"].apply(lambda s: s.shift(1).expanding().mean()).reset_index(level=0, drop=True)
+    d["career_prev_mean_gamescore_pg"] = grouped["game_score_per_game"].apply(lambda s: s.shift(1).expanding().mean()).reset_index(level=0, drop=True)
+
+    d["career_prev_peak_points_pg"] = grouped["points_per_game"].apply(lambda s: s.shift(1).cummax()).reset_index(level=0, drop=True)
+    d["career_prev_peak_goals_pg"] = grouped["goals_per_game"].apply(lambda s: s.shift(1).cummax()).reset_index(level=0, drop=True)
+
+    d["recent_3yr_mean_points_pg"] = grouped["points_per_game"].apply(lambda s: s.shift(1).rolling(3, min_periods=1).mean()).reset_index(level=0, drop=True)
+    d["recent_3yr_mean_goals_pg"] = grouped["goals_per_game"].apply(lambda s: s.shift(1).rolling(3, min_periods=1).mean()).reset_index(level=0, drop=True)
+    d["recent_3yr_mean_gamescore_pg"] = grouped["game_score_per_game"].apply(lambda s: s.shift(1).rolling(3, min_periods=1).mean()).reset_index(level=0, drop=True)
+
+    d["recent_3yr_points_slope"] = grouped["points_per_game"].apply(lambda s: prior_slope(s, window=3)).reset_index(level=0, drop=True)
+    d["recent_3yr_goals_slope"] = grouped["goals_per_game"].apply(lambda s: prior_slope(s, window=3)).reset_index(level=0, drop=True)
+    d["recent_3yr_gamescore_slope"] = grouped["game_score_per_game"].apply(lambda s: prior_slope(s, window=3)).reset_index(level=0, drop=True)
+
+    d["career_points_slope"] = grouped["points_per_game"].apply(lambda s: prior_slope(s, window=None)).reset_index(level=0, drop=True)
+    d["career_goals_slope"] = grouped["goals_per_game"].apply(lambda s: prior_slope(s, window=None)).reset_index(level=0, drop=True)
+    d["career_gamescore_slope"] = grouped["game_score_per_game"].apply(lambda s: prior_slope(s, window=None)).reset_index(level=0, drop=True)
+
+    return d
+
+
 # ── Team context ───────────────────────────────────────────────────────────────
 
 def build_team_context(df):
+    agg_dict = dict(
+        team_median_toi_pg    = ("toi_per_game",                                    "median"),
+        team_avg_hd_share     = ("hd_shot_share",                                   "mean"),
+        team_avg_adj_xg_per60 = ("ind_flurry_score_venue_adj_expected_goals_per60", "mean"),
+        _team_avg_raw_xg      = ("ind_expected_goals_per60",                        "mean"),
+        team_avg_primary_rate = ("primary_assist_share",                            "mean"),
+        team_avg_on_target    = ("on_target_rate",                                  "mean"),
+    )
+    # Add team line quality if available
+    if "line_adj_xg_per60" in df.columns:
+        agg_dict.update(
+            team_avg_line_adj_xg_per60 = ("line_adj_xg_per60", "mean"),
+            team_avg_line_xg_pct       = ("line_xg_pct",       "mean"),
+            team_avg_line_hd_xg_per60  = ("line_hd_xg_per60",  "mean"),
+            team_avg_line_corsi_pct    = ("line_corsi_pct",     "mean"),
+        )
     team_ctx = (
         df.groupby(["player_team", "season", "position"])
-        .agg(
-            team_median_toi_pg    = ("toi_per_game",                                    "median"),
-            team_avg_hd_share     = ("hd_shot_share",                                   "mean"),
-            team_avg_adj_xg_per60 = ("ind_flurry_score_venue_adj_expected_goals_per60", "mean"),
-            _team_avg_raw_xg      = ("ind_expected_goals_per60",                        "mean"),
-            team_avg_primary_rate = ("primary_assist_share",                            "mean"),
-            team_avg_on_target    = ("on_target_rate",                                  "mean"),
-        )
+        .agg(**agg_dict)
         .reset_index()
     )
     team_ctx["team_adj_ratio"] = safe_div(
         team_ctx["team_avg_adj_xg_per60"], team_ctx["_team_avg_raw_xg"], fill=1.0
     )
-    return team_ctx.drop(columns=["_team_avg_raw_xg"])
+    team_ctx = team_ctx.drop(columns=["_team_avg_raw_xg"])
+    # Fill line quality cols if missing
+    for col in ["team_avg_line_adj_xg_per60","team_avg_line_xg_pct",
+                "team_avg_line_hd_xg_per60","team_avg_line_corsi_pct"]:
+        if col not in team_ctx.columns:
+            team_ctx[col] = 0.0
+    return team_ctx
 
 
 def get_latest_team_contexts(df, team_ctx):
@@ -206,31 +335,13 @@ def get_latest_team_contexts(df, team_ctx):
     return ctx
 
 
-# ── Weighted player profile ────────────────────────────────────────────────────
+# ── Player profile ─────────────────────────────────────────────────────────────
 
 def build_weighted_player_profile(player_rows, has_age):
-    seasons = sorted(player_rows["season"].unique(), reverse=True)[:N_SEASONS]
-    feats   = PLAYER_FEATURES + (AGE_FEATURES if has_age else [])
-
-    weighted_rows = []
-    for i, season in enumerate(seasons):
-        season_rows   = player_rows[player_rows["season"] == season]
-        season_weight = SEASON_WEIGHTS[i]
-        if len(season_rows) == 1:
-            weighted_rows.append((season_rows.iloc[0], season_weight))
-        else:
-            total_ice = season_rows["ice_time"].sum()
-            for _, row in season_rows.iterrows():
-                ice_share   = row["ice_time"] / total_ice if total_ice > 0 else 1.0 / len(season_rows)
-                weighted_rows.append((row, season_weight * ice_share))
-
-    profile = weighted_rows[0][0].copy()
-    for feat in feats:
-        vals = [(row[feat], w) for row, w in weighted_rows
-                if feat in row.index and not pd.isna(row[feat])]
-        if vals:
-            profile[feat] = sum(v * w for v, w in vals) / sum(w for _, w in vals)
-
+    latest_season = player_rows["season"].max()
+    latest_rows = player_rows[player_rows["season"] == latest_season].copy()
+    profile = latest_rows.sort_values("ice_time", ascending=False).iloc[0].copy()
+    seasons = [latest_season]
     return profile, seasons
 
 
@@ -274,7 +385,49 @@ def build_next_feature_matrix(df, has_age):
     return X.replace([np.inf, -np.inf], np.nan).fillna(0)
 
 
+def _canonical_target_name(target_col):
+    return target_col[5:] if target_col.startswith("next_") else target_col
+
+
+def compute_target_baseline(df_like, target_col):
+    """Build leakage-safe baseline for a target using prior-season history features."""
+    base_target = _canonical_target_name(target_col)
+    candidate_cols = [c for c in BASELINE_FEATURES.get(base_target, []) if c in df_like.columns]
+    if not candidate_cols:
+        return pd.Series(np.zeros(len(df_like)), index=df_like.index, dtype=float)
+
+    baseline = df_like[candidate_cols].bfill(axis=1).iloc[:, 0]
+    baseline = baseline.fillna(0.0)
+    return baseline.astype(float)
+
+
+def make_elite_sample_weights(y):
+    """Upweight high-end outcomes so the model spends more capacity on elite players."""
+    arr = np.asarray(y, dtype=float)
+    if len(arr) == 0:
+        return np.array([], dtype=float)
+
+    q75, q90, q95 = np.quantile(arr, [0.75, 0.90, 0.95])
+    weights = np.ones(len(arr), dtype=float)
+    weights += 0.5 * (arr >= q75)
+    weights += 1.0 * (arr >= q90)
+    weights += 1.5 * (arr >= q95)
+
+    denom = q95 if q95 > 0 else 1.0
+    weights += 0.5 * np.clip(arr / denom, 0.0, 2.0)
+    return weights
+
+
 # ── Training ───────────────────────────────────────────────────────────────────
+
+def make_lgbm():
+    return lgb.LGBMRegressor(
+        n_estimators=1000, max_depth=8, learning_rate=0.03,
+        subsample=0.9, colsample_bytree=0.9, min_child_samples=2,
+        reg_alpha=0.01, reg_lambda=0.01,
+        objective="regression_l2", random_state=42, verbose=-1,
+    )
+
 
 def train_models_with_progress(X, df, targets, target_col_map, label_prefix, status, bar, step, total_steps):
     kf      = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=42)
@@ -282,42 +435,40 @@ def train_models_with_progress(X, df, targets, target_col_map, label_prefix, sta
     metrics = {}
 
     for target in targets:
-        label = TARGET_LABELS[target]
-        y     = df[target_col_map[target]].values
+        label     = TARGET_LABELS[target]
+        target_col = target_col_map[target]
+        y         = np.clip(df[target_col].values, 0, None)
+        baseline  = compute_target_baseline(df, target_col).values
+        y_resid   = y - baseline
+        sample_w  = make_elite_sample_weights(y)
+        elite_cut = np.quantile(y, ELITE_QUANTILE)
 
-        base_model = Pipeline([
-            ("scaler", StandardScaler()),
-            ("gbm", GradientBoostingRegressor(
-                n_estimators=100, max_depth=3, learning_rate=0.1,
-                subsample=0.8, min_samples_leaf=10, random_state=42,
-                loss="huber",
-                # Huber loss: MSE for small errors, MAE for large errors
-                # Reduces shrinkage toward mean for elite players
-            )),
-        ])
-
-        # Log-transform target — fixes right-skewed distribution and
-        # reduces shrinkage toward the mean for high-performing players
-        y_log = np.log1p(np.clip(y, 0, None))
-
-        fold_maes, fold_rmses = [], []
+        # ── Cross-validation on full dataset for metrics ──────────────────
+        fold_maes, fold_rmses, fold_elite_maes = [], [], []
         for fold, (tr, val) in enumerate(kf.split(X), 1):
-            status.markdown(f"🔁 **{label_prefix} — {label}** fold {fold}/{CV_FOLDS}")
-            m = clone(base_model)
-            m.fit(X.iloc[tr], y_log[tr])
-            preds = np.expm1(m.predict(X.iloc[val]))
-            fold_maes.append(mean_absolute_error(y[val], preds))
-            fold_rmses.append(np.sqrt(mean_squared_error(y[val], preds)))
+            status.markdown(f"🔁 **{label_prefix} — {label}** CV fold {fold}/{CV_FOLDS}")
+            gm = make_lgbm()
+            gm.fit(X.iloc[tr], y_resid[tr], sample_weight=sample_w[tr])
+            fold_preds = baseline[val] + gm.predict(X.iloc[val])
+            fold_preds = np.clip(fold_preds, 0, None)
+            fold_maes.append(mean_absolute_error(y[val], fold_preds))
+            fold_rmses.append(np.sqrt(mean_squared_error(y[val], fold_preds)))
+            elite_mask = y[val] >= elite_cut
+            if elite_mask.any():
+                fold_elite_maes.append(mean_absolute_error(y[val][elite_mask], fold_preds[elite_mask]))
             step += 1
             bar.progress(min(step / total_steps, 1.0),
                          text=f"{label_prefix} {label}: fold {fold}/{CV_FOLDS} — MAE {np.mean(fold_maes):.3f}")
 
-        status.markdown(f"✅ **{label_prefix} — {label}** fitting final model...")
-        base_model.fit(X, y_log)
-        models[target]  = base_model
+        # ── Train final model on full data ───────────────────────────────
+        status.markdown(f"✅ **{label_prefix} — {label}** fitting final residual model...")
+        gm = make_lgbm()
+        gm.fit(X, y_resid, sample_weight=sample_w)
+        models[target]  = {"global": gm}
         metrics[target] = {
             "mae":  (float(np.mean(fold_maes)),  float(np.std(fold_maes))),
             "rmse": (float(np.mean(fold_rmses)), float(np.std(fold_rmses))),
+            "elite_mae": (float(np.mean(fold_elite_maes)), float(np.std(fold_elite_maes))) if fold_elite_maes else (np.nan, np.nan),
         }
         step += 1
         bar.progress(min(step / total_steps, 1.0),
@@ -344,6 +495,8 @@ def load_and_train_with_progress(path, ages_path):
     df   = pd.read_csv(path)
     raw_targets = ["game_score", "ind_points_per60", "ind_goals_per60", "ice_time", "games_played"]
     df   = df[(df["games_played"] >= MIN_GP) & (df["ice_time"] >= MIN_ICE)].dropna(subset=raw_targets).copy()
+    # Train forwards-only models.
+    df   = df[df["position"].isin(FORWARD_POSITIONS)].copy()
     ages = pd.read_csv(ages_path)[["player_id", "season", "age", "age_sq"]]
     df   = df.merge(ages, on=["player_id", "season"], how="left")
     # Join powerplay and zone start features
@@ -361,23 +514,24 @@ def load_and_train_with_progress(path, ages_path):
     df   = df.merge(lm, on=["player_id", "season"], how="left")
     df[lm_cols[2:]] = df[lm_cols[2:]].fillna(0)
     has_age = df["age"].notna().mean() > 0.5
-    advance(f"Data loaded — {len(df):,} rows  |  age matched: {df['age'].notna().sum():,}")
+    advance(f"Data loaded (forwards only) — {len(df):,} rows  |  age matched: {df['age'].notna().sum():,}")
 
     # ── Engineer ───────────────────────────────────────────────────────────────
     status.markdown("⚙️ **Engineering features...**")
     df       = engineer_player_features(df)
     df       = engineer_trajectory_features(df)
+    df       = engineer_career_history_features(df)
     team_ctx = build_team_context(df)
     df       = df.merge(team_ctx, on=["player_team", "season", "position"], how="left")
     advance("Features engineered")
 
-    # ── Weighted profiles ──────────────────────────────────────────────────────
-    status.markdown("⚙️ **Building weighted player profiles...**")
+    # ── Player profiles ────────────────────────────────────────────────────────
+    status.markdown("⚙️ **Building latest-season player profiles...**")
     player_profiles = {}
     for pid, group in df.groupby("player_id"):
         profile, seasons = build_weighted_player_profile(group, has_age)
         player_profiles[pid] = (profile, seasons)
-    advance(f"Profiles built — {len(player_profiles):,} players")
+    advance(f"Profiles built from latest seasons — {len(player_profiles):,} players")
 
     # ── Team fit model ─────────────────────────────────────────────────────────
     status.markdown("⚙️ **Training Team Fit models...**")
@@ -452,9 +606,11 @@ def _build_team_predictions(profile, position, all_teams, models, has_age, use_n
     ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
     results = all_teams[["player_team"]].reset_index(drop=True).copy()
-    for target, model in models.items():
+    for target, model_dict in models.items():
         try:
-            results[f"pred_{target}"] = np.expm1(model.predict(X_pred))
+            baseline = compute_target_baseline(pred_df, target).values
+            resid = model_dict["global"].predict(X_pred)
+            results[f"pred_{target}"] = np.clip(baseline + resid, 0, None)
         except Exception:
             results[f"pred_{target}"] = np.nan
 
@@ -524,8 +680,11 @@ def make_bar_chart(results, player_name, actual_team, title):
     for ax, col, label in zip(axes, metric_cols, metric_labels):
         ax.set_facecolor("#0e1117")
         sr = results.sort_values(col)
-        bar_colors = ["#c8102e" if t == actual_team else "#4a90d9" for t in sr["player_team"]]
-        ax.barh(sr["player_team"], sr[col], color=bar_colors)
+        bars = ax.barh(sr["player_team"], sr[col], color="#4a90d9")
+        for bar, team in zip(bars, sr["player_team"]):
+            if team == actual_team:
+                bar.set_edgecolor("#c8102e")
+                bar.set_linewidth(2.5)
         actual_val = results.loc[results["player_team"] == actual_team, col].values[0]
         ax.axvline(actual_val, color="#c8102e", linestyle="--", linewidth=1.2)
         ax.set_xlabel(label, color="white", fontsize=11)
@@ -533,9 +692,10 @@ def make_bar_chart(results, player_name, actual_team, title):
         for spine in ax.spines.values():
             spine.set_edgecolor("#333")
 
-    actual_patch = mpatches.Patch(color="#c8102e", label=f"Actual team ({actual_team})")
-    other_patch  = mpatches.Patch(color="#4a90d9", label="Other teams")
-    axes[-1].legend(handles=[actual_patch, other_patch], facecolor="#1a1a2e", labelcolor="white", loc="lower right")
+    actual_patch = mpatches.Patch(edgecolor="#c8102e", facecolor="none",
+                                  linewidth=2.5, label=f"Actual team ({actual_team})")
+    axes[-1].legend(handles=[actual_patch],
+                    facecolor="#1a1a2e", labelcolor="white", loc="lower right", fontsize=8)
     plt.tight_layout()
     return fig
 
@@ -545,7 +705,8 @@ def make_importance_chart(models, feature_names, top_n=15):
     fig.patch.set_facecolor("#0e1117")
     for ax, target in zip(axes, TARGETS):
         ax.set_facecolor("#0e1117")
-        imp = models[target].named_steps["gbm"].feature_importances_
+        m   = models[target].get("global") or next(iter(models[target].values()))
+        imp = m.feature_importances_
         idx = np.argsort(imp)[-top_n:]
         ax.barh([feature_names[i] for i in idx], imp[idx], color="#4a90d9")
         ax.set_title(TARGET_LABELS[target], color="white", fontsize=11)
@@ -575,7 +736,7 @@ def show_results_table(results, actual_team):
 
 
 def show_metrics(metrics, label):
-    st.markdown(f"**{label} model quality (5-fold CV)**")
+    st.markdown(f"**{label} model quality ({CV_FOLDS}-fold CV)**")
     st.caption("MAE = avg absolute error in same units as stat. RMSE penalises large errors more. Lower is better.")
     for target in TARGETS:
         mae_mean,  mae_std  = metrics[target]["mae"]
@@ -584,6 +745,30 @@ def show_metrics(metrics, label):
         c1, c2, _ = st.columns(3)
         c1.metric("MAE",  f"{mae_mean:.3f}", f"± {mae_std:.3f}")
         c2.metric("RMSE", f"{rmse_mean:.3f}", f"± {rmse_std:.3f}")
+        elite_mae_mean, elite_mae_std = metrics[target].get("elite_mae", (np.nan, np.nan))
+        if not pd.isna(elite_mae_mean):
+            st.caption(f"Elite MAE (top 10% actual): {elite_mae_mean:.3f} ± {elite_mae_std:.3f}")
+
+
+def elite_segment_stats(val_df, actual_col, pred_col, quantile=0.90):
+    if val_df.empty:
+        return np.nan, np.nan, 0
+    cutoff = val_df[actual_col].quantile(quantile)
+    seg = val_df[val_df[actual_col] >= cutoff]
+    if seg.empty:
+        return np.nan, np.nan, 0
+    mae = mean_absolute_error(seg[actual_col], seg[pred_col])
+    # Positive bias means model overpredicts; negative means underpredicts.
+    bias = (seg[pred_col] - seg[actual_col]).mean()
+    return float(mae), float(bias), int(len(seg))
+
+
+def calibration_slope(val_df, actual_col, pred_col):
+    x = val_df[pred_col].values
+    y = val_df[actual_col].values
+    if len(x) < 2 or np.std(x) == 0:
+        return np.nan
+    return np.polyfit(x, y, 1)[0]
 
 
 
@@ -677,9 +862,13 @@ def build_validation_results(actual_df, df, team_ctx, fit_models,
              pos_d[POSITION_DUMMIES].reset_index(drop=True)], axis=1
         ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        pred_pts   = np.expm1(fit_models["points_per_game"].predict(X_pred)[0])
-        pred_goals = np.expm1(fit_models["goals_per_game"].predict(X_pred)[0])
-        pred_gs    = np.expm1(fit_models["game_score_per_game"].predict(X_pred)[0])
+        base_pts   = compute_target_baseline(pred_df, "points_per_game").values[0]
+        base_goals = compute_target_baseline(pred_df, "goals_per_game").values[0]
+        base_gs    = compute_target_baseline(pred_df, "game_score_per_game").values[0]
+
+        pred_pts   = np.clip(base_pts + fit_models["points_per_game"]["global"].predict(X_pred)[0], 0, None)
+        pred_goals = np.clip(base_goals + fit_models["goals_per_game"]["global"].predict(X_pred)[0], 0, None)
+        pred_gs    = np.clip(base_gs + fit_models["game_score_per_game"]["global"].predict(X_pred)[0], 0, None)
 
         rows.append({
             "player_name":       actual["player_name"],
@@ -716,10 +905,148 @@ def make_scatter(val_df, actual_col, pred_col, label, ax):
     ax.text(0.05, 0.92, f"MAE {mae:.3f}  |  r {corr:.2f}",
             transform=ax.transAxes, color="white", fontsize=9)
 
+
+def normalize_roster_position(raw_pos):
+    p = str(raw_pos).upper()
+    if p in {"C", "L", "R", "LW", "RW"}:
+        return "L" if p == "LW" else "R" if p == "RW" else p
+    return None
+
+
+def parse_roster_entries(entries, team_code):
+    rows = []
+    for p in entries:
+        pid = p.get("id") or p.get("playerId")
+        if pid is None:
+            continue
+        pos = normalize_roster_position(p.get("positionCode") or p.get("position"))
+        if pos is None:
+            continue
+        first = p.get("firstName", {}).get("default") if isinstance(p.get("firstName"), dict) else p.get("firstName")
+        last = p.get("lastName", {}).get("default") if isinstance(p.get("lastName"), dict) else p.get("lastName")
+        full_name = p.get("fullName") or " ".join([str(first or "").strip(), str(last or "").strip()]).strip()
+        if not full_name:
+            full_name = str(p.get("name", "Unknown Player"))
+        rows.append({
+            "player_id": int(pid),
+            "player_name": full_name,
+            "position": pos,
+            "nhl_team": team_code,
+        })
+    return rows
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_active_team_roster(team_code, season=CURRENT_SEASON):
+    url = f"https://api-web.nhle.com/v1/roster/{team_code}/{season}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        forwards = parse_roster_entries(data.get("forwards", []), team_code)
+        defense = parse_roster_entries(data.get("defensemen", []), team_code)
+        roster_df = pd.DataFrame(forwards + defense)
+        if roster_df.empty:
+            return None, f"No skater roster data found for {team_code}."
+        roster_df = roster_df.drop_duplicates(subset=["player_id"]).reset_index(drop=True)
+        return roster_df, None
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_all_active_rosters(season=CURRENT_SEASON):
+    rosters = {}
+    errors = {}
+    for team in NHL_TEAMS:
+        roster_df, err = fetch_active_team_roster(team, season)
+        if err:
+            errors[team] = err
+        elif roster_df is not None:
+            rosters[team] = roster_df
+    return rosters, errors
+
+
+def assign_deployment_bucket(rank, pred_points_gp):
+    if rank <= 2:
+        bucket = "elite"
+    elif rank <= 6:
+        bucket = "top6"
+    elif rank <= 12:
+        bucket = "bottom6"
+    else:
+        bucket = "depth"
+
+    if bucket == "elite" and pred_points_gp < ROLE_MIN_PPG["elite"]:
+        bucket = "top6"
+    if bucket == "top6" and pred_points_gp < ROLE_MIN_PPG["top6"]:
+        bucket = "bottom6"
+    if bucket == "bottom6" and pred_points_gp < ROLE_MIN_PPG["bottom6"]:
+        bucket = "depth"
+    return bucket
+
+
+def build_roster_deployment(team_code, roster_df, df, team_ctx, fit_models, player_profiles, has_age):
+    latest_ctx = get_latest_team_contexts(df, team_ctx)
+    rows = []
+    skipped = 0
+
+    for _, rp in roster_df.iterrows():
+        pid = int(rp["player_id"])
+        if pid not in player_profiles:
+            skipped += 1
+            continue
+        profile, seasons = player_profiles[pid]
+        position = profile.get("position")
+        if position not in ["C", "L", "R", "D"]:
+            skipped += 1
+            continue
+
+        all_teams = latest_ctx[latest_ctx["position"] == position].copy()
+        if all_teams.empty:
+            skipped += 1
+            continue
+
+        team_fit = _build_team_predictions(profile, position, all_teams, fit_models, has_age, df=df)
+        team_fit = team_fit.sort_values("pred_points_per_game", ascending=False).reset_index(drop=True)
+        team_fit.index += 1
+
+        current_row = team_fit[team_fit["player_team"] == team_code]
+        if current_row.empty:
+            skipped += 1
+            continue
+
+        best_row = team_fit.iloc[0]
+        cur = current_row.iloc[0]
+        rows.append({
+            "player_id": pid,
+            "player_name": rp["player_name"],
+            "position": position,
+            "nhl_team": team_code,
+            "pred_game_score_gp": float(cur["pred_game_score_per_game"]),
+            "pred_points_gp": float(cur["pred_points_per_game"]),
+            "pred_goals_gp": float(cur["pred_goals_per_game"]),
+            "best_fit_team": best_row["player_team"],
+            "best_fit_points_gp": float(best_row["pred_points_per_game"]),
+            "seasons_used": " -> ".join(str(s) for s in seasons),
+        })
+
+    if not rows:
+        return pd.DataFrame(), skipped
+
+    out = pd.DataFrame(rows).sort_values("pred_points_gp", ascending=False).reset_index(drop=True)
+    out["rank"] = out.index + 1
+    out["deployment_bucket"] = out.apply(
+        lambda r: assign_deployment_bucket(int(r["rank"]), float(r["pred_points_gp"])), axis=1
+    )
+    out["deployment_role"] = out["deployment_bucket"].map(ROLE_LABELS)
+    return out, skipped
+
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
-st.title("🏒 NHL Player Predictor")
+st.title("NHL Acquisition Player Predictor")
+st.caption("Forwards-only mode: defensemen are excluded from training and predictions.")
 
 if "fit_models" not in st.session_state:
     if os.path.exists(CACHE_FILE):
@@ -797,7 +1124,13 @@ if player_input:
                               player_profiles, has_age, override_team=override_team)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Team Fit", "🔮 Next Season", "🔬 Model Info", "✅ 2025-26 Validation"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Team Fit",
+    "🔮 Next Season",
+    "🔬 Model Info",
+    "✅ 2025-26 Validation",
+    "🏒 Active Roster Roles",
+])
 
 with tab1:
     if pred:
@@ -903,6 +1236,33 @@ with tab4:
             c2.metric("Goals/GP MAE",
                       f"{mean_absolute_error(val_df['actual_goals_gp'], val_df['pred_goals_gp']):.3f}")
 
+            pred_range = val_df["pred_points_gp"].max() - val_df["pred_points_gp"].min()
+            actual_range = val_df["actual_points_gp"].max() - val_df["actual_points_gp"].min()
+            compression_ratio = pred_range / actual_range if actual_range > 0 else np.nan
+            slope = calibration_slope(val_df, "actual_points_gp", "pred_points_gp")
+            c3, c4 = st.columns(2)
+            c3.metric("Prediction Spread Ratio", f"{compression_ratio:.2%}" if not pd.isna(compression_ratio) else "n/a")
+            c4.metric("Calibration Slope", f"{slope:.2f}" if not pd.isna(slope) else "n/a")
+
+            elite_pts_mae, elite_pts_bias, elite_pts_n = elite_segment_stats(
+                val_df, "actual_points_gp", "pred_points_gp", quantile=ELITE_QUANTILE
+            )
+            elite_goals_mae, elite_goals_bias, elite_goals_n = elite_segment_stats(
+                val_df, "actual_goals_gp", "pred_goals_gp", quantile=ELITE_QUANTILE
+            )
+            e1, e2 = st.columns(2)
+            e1.metric(
+                f"Elite Points/GP MAE (top {int((1-ELITE_QUANTILE)*100)}%)",
+                f"{elite_pts_mae:.3f}" if not pd.isna(elite_pts_mae) else "n/a",
+                f"bias {elite_pts_bias:+.3f}" if not pd.isna(elite_pts_bias) else None,
+            )
+            e2.metric(
+                f"Elite Goals/GP MAE (top {int((1-ELITE_QUANTILE)*100)}%)",
+                f"{elite_goals_mae:.3f}" if not pd.isna(elite_goals_mae) else "n/a",
+                f"bias {elite_goals_bias:+.3f}" if not pd.isna(elite_goals_bias) else None,
+            )
+            st.caption(f"Elite segment sample sizes: Points {elite_pts_n}, Goals {elite_goals_n}")
+
             st.divider()
 
             # Biggest misses
@@ -927,3 +1287,75 @@ with tab4:
             csv = val_df.to_csv(index=False)
             st.download_button("⬇ Download full validation CSV", data=csv,
                                file_name="validation_2025_26.csv", mime="text/csv")
+
+with tab5:
+    st.subheader("Active NHL Roster Deployment")
+    st.caption(
+        "Ranks active skaters on each NHL roster by predicted Points/Game on their current team context. "
+        "Buckets use rank cutoffs (1-2 elite, 3-6 top-6, 7-12 bottom-6, 13+ depth) plus minimum Points/Game floors."
+    )
+
+    c1, c2 = st.columns([1, 1])
+    selected_team = c1.selectbox("Team", options=NHL_TEAMS, index=NHL_TEAMS.index("TOR") if "TOR" in NHL_TEAMS else 0)
+    view_mode = c2.radio("View", options=["Current Team Roles", "All-Team Fit Context"], horizontal=True)
+
+    c3, c4 = st.columns([1, 1])
+    if c3.button("🔄 Refresh selected team roster"):
+        fetch_active_team_roster.clear()
+    if c4.button("🔄 Refresh all 32 rosters"):
+        fetch_all_active_rosters.clear()
+
+    roster_df, roster_err = fetch_active_team_roster(selected_team, CURRENT_SEASON)
+    if roster_err:
+        st.error(f"Could not fetch {selected_team} roster: {roster_err}")
+    elif roster_df is not None:
+        with st.spinner("Predicting roster roles..."):
+            deployment_df, skipped = build_roster_deployment(
+                selected_team, roster_df, df, team_ctx, fit_models, player_profiles, has_age
+            )
+
+        if deployment_df.empty:
+            st.warning("No active skaters from this roster matched the model profile set.")
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Skaters on API roster", len(roster_df))
+            m2.metric("Matched to model", len(deployment_df))
+            m3.metric("Skipped", skipped)
+
+            if view_mode == "Current Team Roles":
+                show_cols = [
+                    "rank", "player_name", "position", "deployment_role",
+                    "pred_points_gp", "pred_goals_gp", "pred_game_score_gp"
+                ]
+            else:
+                show_cols = [
+                    "rank", "player_name", "position", "deployment_role", "pred_points_gp",
+                    "best_fit_team", "best_fit_points_gp", "seasons_used"
+                ]
+
+            show_df = deployment_df[show_cols].copy()
+            show_df.columns = [
+                "Rank", "Player", "Pos", "Current Role", "Points/GP",
+                "Goals/GP", "GS/GP"
+            ] if view_mode == "Current Team Roles" else [
+                "Rank", "Player", "Pos", "Current Role", "Current Team Points/GP",
+                "Best Fit Team", "Best Fit Points/GP", "Seasons Used"
+            ]
+
+            st.dataframe(show_df, use_container_width=True, height=500)
+
+            bucket_counts = deployment_df["deployment_role"].value_counts()
+            st.markdown("#### Role Counts")
+            rc = st.columns(4)
+            rc[0].metric("Top 2 Elite", int(bucket_counts.get("Top 2 Elite", 0)))
+            rc[1].metric("Top 6", int(bucket_counts.get("Top 6", 0)))
+            rc[2].metric("Bottom 6", int(bucket_counts.get("Bottom 6", 0)))
+            rc[3].metric("Depth", int(bucket_counts.get("Depth", 0)))
+
+            csv = deployment_df.to_csv(index=False)
+            st.download_button(
+                "⬇ Download roster deployment CSV",
+                data=csv,
+                file_name=f"{selected_team}_active_roster_roles.csv",
+                mime="text/csv",
+            )
