@@ -30,6 +30,8 @@ warnings.filterwarnings("ignore")
 
 DATA_FILE      = "offensive_performance_by_season_per60_renamed.csv"
 AGES_FILE      = "player_ages.csv"
+PP_FILE        = "pp_features.csv"
+LINEMATE_FILE  = "linemate_features.csv"
 CACHE_FILE     = "trained_models.joblib"
 TARGETS        = ["game_score_per_game", "points_per_game", "goals_per_game"]
 MIN_GP         = 20
@@ -65,6 +67,25 @@ PLAYER_FEATURES = [
     # Scoring environment — captures league-wide trends by season
     "league_avg_points_pg",
     "league_avg_goals_pg",
+    # Career peak features — player ceiling signal
+    "career_peak_points_pg",
+    "career_peak_goals_pg",
+    "pct_of_peak_points",
+    "pct_of_peak_goals",
+    # Linemate quality features — captures line environment
+    "line_adj_xg_per60",    # fully adjusted xG rate of player's line
+    "line_xg_pct",          # line possession quality
+    "line_hd_xg_per60",     # high danger chance generation
+    "line_corsi_pct",       # shot attempt share
+    "n_distinct_lines",     # role stability — fewer lines = more settled
+    # Powerplay & zone start features — key deployment signals
+    "pp_icetime_pct",
+    "pp_points_per60",
+    "pp_goals_per60",
+    "pp_xg_per60",
+    "pp_points_share",
+    "o_zone_start_pct",
+    "zone_start_diff",
 ]
 
 # Age features — only added when age data is available
@@ -116,6 +137,16 @@ def engineer_player_features(df):
     # vary by season and adjust predictions accordingly
     d["league_avg_points_pg"] = d.groupby("season")["points_per_game"].transform("mean")
     d["league_avg_goals_pg"]  = d.groupby("season")["goals_per_game"].transform("mean")
+    # Career peak features — anchors the model to a player's ceiling
+    # rather than letting weighted averaging compress top performers
+    d["career_peak_points_pg"] = d.groupby("player_id")["points_per_game"].transform("max")
+    d["career_peak_goals_pg"]  = d.groupby("player_id")["goals_per_game"].transform("max")
+    d["pct_of_peak_points"]    = safe_div(
+        d["points_per_game"], d["career_peak_points_pg"], fill=0.0
+    )
+    d["pct_of_peak_goals"]     = safe_div(
+        d["goals_per_game"], d["career_peak_goals_pg"], fill=0.0
+    )
     # Age interaction features — lets model learn that the same skill level
     # means something different at 25 vs 35
     if "age" in d.columns:
@@ -259,6 +290,9 @@ def train_models_with_progress(X, df, targets, target_col_map, label_prefix, sta
             ("gbm", GradientBoostingRegressor(
                 n_estimators=100, max_depth=3, learning_rate=0.1,
                 subsample=0.8, min_samples_leaf=10, random_state=42,
+                loss="huber",
+                # Huber loss: MSE for small errors, MAE for large errors
+                # Reduces shrinkage toward mean for elite players
             )),
         ])
 
@@ -312,6 +346,20 @@ def load_and_train_with_progress(path, ages_path):
     df   = df[(df["games_played"] >= MIN_GP) & (df["ice_time"] >= MIN_ICE)].dropna(subset=raw_targets).copy()
     ages = pd.read_csv(ages_path)[["player_id", "season", "age", "age_sq"]]
     df   = df.merge(ages, on=["player_id", "season"], how="left")
+    # Join powerplay and zone start features
+    pp_cols = ["player_id", "season", "pp_icetime_pct", "pp_points_per60",
+               "pp_goals_per60", "pp_xg_per60", "pp_points_share",
+               "o_zone_start_pct", "zone_start_diff"]
+    pp   = pd.read_csv(PP_FILE)[pp_cols]
+    df   = df.merge(pp, on=["player_id", "season"], how="left")
+    df[pp_cols[2:]] = df[pp_cols[2:]].fillna(0)
+    # Join linemate quality features
+    lm_cols = ["player_id", "season", "line_adj_xg_per60", "line_xg_per60",
+               "line_hd_xg_per60", "line_goals_per60", "line_xg_pct",
+               "line_corsi_pct", "n_distinct_lines"]
+    lm   = pd.read_csv(LINEMATE_FILE)[lm_cols]
+    df   = df.merge(lm, on=["player_id", "season"], how="left")
+    df[lm_cols[2:]] = df[lm_cols[2:]].fillna(0)
     has_age = df["age"].notna().mean() > 0.5
     advance(f"Data loaded — {len(df):,} rows  |  age matched: {df['age'].notna().sum():,}")
 
