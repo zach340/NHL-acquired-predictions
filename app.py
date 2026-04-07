@@ -9,6 +9,9 @@ Tabs:
 """
 
 import warnings
+import os
+import joblib
+import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -27,17 +30,18 @@ warnings.filterwarnings("ignore")
 
 DATA_FILE      = "offensive_performance_by_season_per60_renamed.csv"
 AGES_FILE      = "player_ages.csv"
-TARGETS        = ["game_score_per_game", "ind_points_per60", "ind_goals_per60"]
+CACHE_FILE     = "trained_models.joblib"
+TARGETS        = ["game_score_per_game", "points_per_game", "goals_per_game"]
 MIN_GP         = 20
 MIN_ICE        = 300
-CV_FOLDS       = 5
+CV_FOLDS       = 3
 N_SEASONS      = 3
 SEASON_WEIGHTS = [3, 2, 1]
 
 TARGET_LABELS = {
     "game_score_per_game": "Game Score / Game",
-    "ind_points_per60":    "Points / 60",
-    "ind_goals_per60":     "Goals / 60",
+    "points_per_game":     "Points / Game",
+    "goals_per_game":      "Goals / Game",
 }
 
 # ── Feature lists ──────────────────────────────────────────────────────────────
@@ -58,10 +62,13 @@ PLAYER_FEATURES = [
     "ind_medium_danger_shots_per60",
     "ind_low_danger_shots_per60",
     "shifts_per60",
+    # Scoring environment — captures league-wide trends by season
+    "league_avg_points_pg",
+    "league_avg_goals_pg",
 ]
 
 # Age features — only added when age data is available
-AGE_FEATURES = ["age", "age_sq"]
+AGE_FEATURES = ["age", "age_sq", "age_x_shot_attempts", "age_x_finishing", "age_x_hd_share"]
 
 TEAM_FEATURES = [
     "team_median_toi_pg",
@@ -103,6 +110,18 @@ def engineer_player_features(df):
     d["on_target_rate"]       = safe_div(d["ind_shots_on_goal_per60"], d["ind_shot_attempts_per60"])
     d["toi_per_game"]         = d["ice_time"] / d["games_played"]
     d["game_score_per_game"]  = d["game_score"] / d["games_played"]
+    d["points_per_game"]      = d["ind_points_per60"] * d["toi_per_game"] / 60
+    d["goals_per_game"]       = d["ind_goals_per60"]  * d["toi_per_game"] / 60
+    # League scoring environment — lets model learn how scoring rates
+    # vary by season and adjust predictions accordingly
+    d["league_avg_points_pg"] = d.groupby("season")["points_per_game"].transform("mean")
+    d["league_avg_goals_pg"]  = d.groupby("season")["goals_per_game"].transform("mean")
+    # Age interaction features — lets model learn that the same skill level
+    # means something different at 25 vs 35
+    if "age" in d.columns:
+        d["age_x_shot_attempts"] = d["age"] * d["ind_shot_attempts_per60"]
+        d["age_x_finishing"]     = d["age"] * d["finishing_skill_adj"]
+        d["age_x_hd_share"]      = d["age"] * d["hd_shot_share"]
     return d
 
 
@@ -238,17 +257,21 @@ def train_models_with_progress(X, df, targets, target_col_map, label_prefix, sta
         base_model = Pipeline([
             ("scaler", StandardScaler()),
             ("gbm", GradientBoostingRegressor(
-                n_estimators=300, max_depth=4, learning_rate=0.05,
+                n_estimators=100, max_depth=3, learning_rate=0.1,
                 subsample=0.8, min_samples_leaf=10, random_state=42,
             )),
         ])
+
+        # Log-transform target — fixes right-skewed distribution and
+        # reduces shrinkage toward the mean for high-performing players
+        y_log = np.log1p(np.clip(y, 0, None))
 
         fold_maes, fold_rmses = [], []
         for fold, (tr, val) in enumerate(kf.split(X), 1):
             status.markdown(f"🔁 **{label_prefix} — {label}** fold {fold}/{CV_FOLDS}")
             m = clone(base_model)
-            m.fit(X.iloc[tr], y[tr])
-            preds = m.predict(X.iloc[val])
+            m.fit(X.iloc[tr], y_log[tr])
+            preds = np.expm1(m.predict(X.iloc[val]))
             fold_maes.append(mean_absolute_error(y[val], preds))
             fold_rmses.append(np.sqrt(mean_squared_error(y[val], preds)))
             step += 1
@@ -256,7 +279,7 @@ def train_models_with_progress(X, df, targets, target_col_map, label_prefix, sta
                          text=f"{label_prefix} {label}: fold {fold}/{CV_FOLDS} — MAE {np.mean(fold_maes):.3f}")
 
         status.markdown(f"✅ **{label_prefix} — {label}** fitting final model...")
-        base_model.fit(X, y)
+        base_model.fit(X, y_log)
         models[target]  = base_model
         metrics[target] = {
             "mae":  (float(np.mean(fold_maes)),  float(np.std(fold_maes))),
@@ -285,7 +308,7 @@ def load_and_train_with_progress(path, ages_path):
     # ── Load ──────────────────────────────────────────────────────────────────
     status.markdown("⚙️ **Loading data...**")
     df   = pd.read_csv(path)
-    raw_targets = ["game_score", "ind_points_per60", "ind_goals_per60"]
+    raw_targets = ["game_score", "ind_points_per60", "ind_goals_per60", "ice_time", "games_played"]
     df   = df[(df["games_played"] >= MIN_GP) & (df["ice_time"] >= MIN_ICE)].dropna(subset=raw_targets).copy()
     ages = pd.read_csv(ages_path)[["player_id", "season", "age", "age_sq"]]
     df   = df.merge(ages, on=["player_id", "season"], how="left")
@@ -340,12 +363,27 @@ def load_and_train_with_progress(path, ages_path):
 
 # ── Prediction (shared) ────────────────────────────────────────────────────────
 
+def get_latest_league_env(df):
+    """Return the most recent season's league-wide scoring averages."""
+    latest    = df["season"].max()
+    latest_df = df[df["season"] == latest]
+    return {
+        "league_avg_points_pg": latest_df["points_per_game"].mean(),
+        "league_avg_goals_pg":  latest_df["goals_per_game"].mean(),
+    }
+
+
 def _build_team_predictions(profile, position, all_teams, models, has_age, use_next_features=False, df=None):
+    # Use most recent season's league scoring environment for all predictions
+    league_env = get_latest_league_env(df) if df is not None else {}
+
     records = []
     for _, team_row in all_teams.iterrows():
         row = profile.copy()
         for col in TEAM_FEATURES:
             row[col] = team_row[col]
+        for k, v in league_env.items():
+            row[k] = v
         records.append(row)
 
     pred_df = pd.DataFrame(records)
@@ -368,7 +406,7 @@ def _build_team_predictions(profile, position, all_teams, models, has_age, use_n
     results = all_teams[["player_team"]].reset_index(drop=True).copy()
     for target, model in models.items():
         try:
-            results[f"pred_{target}"] = model.predict(X_pred)
+            results[f"pred_{target}"] = np.expm1(model.predict(X_pred))
         except Exception:
             results[f"pred_{target}"] = np.nan
 
@@ -400,15 +438,15 @@ def predict_player(player_name, df, team_ctx, fit_models, next_models,
     all_teams = all_teams[all_teams["position"] == position].copy()
 
     # Team fit predictions (current skill)
-    fit_results = _build_team_predictions(profile, position, all_teams, fit_models, has_age)
-    fit_results = fit_results.sort_values("pred_game_score_per_game", ascending=False).reset_index(drop=True)
+    fit_results = _build_team_predictions(profile, position, all_teams, fit_models, has_age, df=df)
+    fit_results = fit_results.sort_values("pred_points_per_game", ascending=False).reset_index(drop=True)
     fit_results.index += 1
     fit_results["is_actual"] = fit_results["player_team"] == actual_team
 
     # Next season predictions
     next_results = _build_team_predictions(profile, position, all_teams, next_models, has_age,
                                            use_next_features=True, df=df)
-    next_results = next_results.sort_values("pred_game_score_per_game", ascending=False).reset_index(drop=True)
+    next_results = next_results.sort_values("pred_points_per_game", ascending=False).reset_index(drop=True)
     next_results.index += 1
     next_results["is_actual"] = next_results["player_team"] == actual_team
 
@@ -428,8 +466,8 @@ def predict_player(player_name, df, team_ctx, fit_models, next_models,
 # ── Charts ─────────────────────────────────────────────────────────────────────
 
 def make_bar_chart(results, player_name, actual_team, title):
-    metric_cols   = ["pred_game_score_per_game", "pred_ind_points_per60", "pred_ind_goals_per60"]
-    metric_labels = ["Game Score / Game", "Points / 60", "Goals / 60"]
+    metric_cols   = ["pred_game_score_per_game", "pred_points_per_game", "pred_goals_per_game"]
+    metric_labels = ["Game Score / Game", "Points / Game", "Goals / Game"]
 
     fig, axes = plt.subplots(1, 3, figsize=(22, 8))
     fig.patch.set_facecolor("#0e1117")
@@ -473,10 +511,10 @@ def make_importance_chart(models, feature_names, top_n=15):
 def show_results_table(results, actual_team):
     display = results[[
         "player_team", "pred_game_score_per_game",
-        "pred_ind_points_per60", "pred_ind_goals_per60", "is_actual"
+        "pred_points_per_game", "pred_goals_per_game", "is_actual"
     ]].copy()
-    display.columns = ["Team", "GS/GP", "Points/60", "Goals/60", "Actual Team"]
-    for col in ["GS/GP", "Points/60", "Goals/60"]:
+    display.columns = ["Team", "GS/GP", "Points/GP", "Goals/GP", "Actual Team"]
+    for col in ["GS/GP", "Points/GP", "Goals/GP"]:
         display[col] = display[col].round(3)
     st.dataframe(
         display.style.apply(
@@ -500,26 +538,174 @@ def show_metrics(metrics, label):
         c2.metric("RMSE", f"{rmse_mean:.3f}", f"± {rmse_std:.3f}")
 
 
+
+# ── 2025-26 Validation ─────────────────────────────────────────────────────────
+
+CURRENT_SEASON = "20252026"
+
+@st.cache_data(show_spinner=False)
+def fetch_nhl_current_season():
+    """
+    Pull 2025-26 skater stats from the NHL API.
+    Returns a DataFrame with player_id, goals_per_game, points_per_game, games_played.
+    """
+    url = (
+        f"https://api.nhle.com/stats/rest/en/skater/summary"
+        f"?limit=-1&start=0&cayenneExp=seasonId={CURRENT_SEASON}"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        df   = pd.json_normalize(data)
+        if df.empty:
+            return None, "No data returned from NHL API."
+
+        df = df.rename(columns={
+            "playerId":      "player_id",
+            "skaterFullName":"player_name",
+            "goals":         "goals",
+            "points":        "points",
+            "gamesPlayed":   "games_played",
+        })
+
+        # Keep only needed columns (handle missing gracefully)
+        keep = ["player_id", "player_name", "goals", "points", "games_played"]
+        df = df[[c for c in keep if c in df.columns]].copy()
+        df = df.dropna(subset=["player_id", "goals", "points", "games_played"])
+        df = df[df["games_played"] >= 10]
+
+        # Convert to per-game
+        df["goals_per_game"]  = df["goals"]  / df["games_played"]
+        df["points_per_game"] = df["points"] / df["games_played"]
+
+        df["player_id"] = df["player_id"].astype(int)
+        return df, None
+
+    except Exception as e:
+        return None, str(e)
+
+
+def build_validation_results(actual_df, df, team_ctx, fit_models,
+                              player_profiles, has_age):
+    """
+    For each player in actual_df, look up the model's prediction for their
+    actual current team and compare to real 2025-26 stats.
+    """
+    rows = []
+    for _, actual in actual_df.iterrows():
+        pid = int(actual["player_id"])
+        if pid not in player_profiles:
+            continue
+
+        profile, seasons = player_profiles[pid]
+        position         = profile["position"]
+        actual_team      = profile["player_team"]
+
+        # Get team context for their actual team
+        all_teams = get_latest_team_contexts(df, team_ctx)
+        team_row  = all_teams[
+            (all_teams["position"] == position) &
+            (all_teams["player_team"] == actual_team)
+        ]
+        if team_row.empty:
+            continue
+
+        # Build single prediction row
+        row = profile.copy()
+        for col in TEAM_FEATURES:
+            row[col] = team_row.iloc[0][col]
+
+        pred_df = pd.DataFrame([row])
+        pos_d   = pd.get_dummies(pred_df["position"], prefix="pos")
+        for c in POSITION_DUMMIES:
+            if c not in pos_d.columns:
+                pos_d[c] = 0
+
+        feats  = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + TEAM_FEATURES
+        feats  = [f for f in feats if f in pred_df.columns]
+        X_pred = pd.concat(
+            [pred_df[feats].reset_index(drop=True),
+             pos_d[POSITION_DUMMIES].reset_index(drop=True)], axis=1
+        ).replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        pred_pts   = np.expm1(fit_models["points_per_game"].predict(X_pred)[0])
+        pred_goals = np.expm1(fit_models["goals_per_game"].predict(X_pred)[0])
+        pred_gs    = np.expm1(fit_models["game_score_per_game"].predict(X_pred)[0])
+
+        rows.append({
+            "player_name":       actual["player_name"],
+            "team":              actual_team,
+            "games_played":      actual["games_played"],
+            "actual_points_gp": round(actual["points_per_game"], 3),
+            "pred_points_gp":   round(pred_pts, 3),
+            "points_gp_error":  round(actual["points_per_game"] - pred_pts, 3),
+            "actual_goals_gp":  round(actual["goals_per_game"], 3),
+            "pred_goals_gp":    round(pred_goals, 3),
+            "goals_gp_error":   round(actual["goals_per_game"] - pred_goals, 3),
+            "pred_gs_per_game":  round(pred_gs, 3),
+            "seasons_used":      " → ".join(str(s) for s in seasons),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def make_scatter(val_df, actual_col, pred_col, label, ax):
+    ax.set_facecolor("#0e1117")
+    ax.scatter(val_df[pred_col], val_df[actual_col],
+               alpha=0.5, color="#4a90d9", s=20)
+    mn = min(val_df[pred_col].min(), val_df[actual_col].min()) - 0.1
+    mx = max(val_df[pred_col].max(), val_df[actual_col].max()) + 0.1
+    ax.plot([mn, mx], [mn, mx], color="#c8102e", linewidth=1, linestyle="--")
+    ax.set_xlabel(f"Predicted {label}", color="white", fontsize=10)
+    ax.set_ylabel(f"Actual {label}", color="white", fontsize=10)
+    ax.set_title(label, color="white", fontsize=11)
+    ax.tick_params(colors="white", labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333")
+    mae  = mean_absolute_error(val_df[actual_col], val_df[pred_col])
+    corr = val_df[[actual_col, pred_col]].corr().iloc[0, 1]
+    ax.text(0.05, 0.92, f"MAE {mae:.3f}  |  r {corr:.2f}",
+            transform=ax.transAxes, color="white", fontsize=9)
+
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
 st.title("🏒 NHL Player Predictor")
 
 if "fit_models" not in st.session_state:
-    st.info("Training models on first load — this takes 5–8 minutes. Grab a coffee ☕")
-    (
-        st.session_state["df"],
-        st.session_state["team_ctx"],
-        st.session_state["has_age"],
-        st.session_state["player_profiles"],
-        st.session_state["fit_models"],
-        st.session_state["fit_metrics"],
-        st.session_state["fit_feature_names"],
-        st.session_state["next_models"],
-        st.session_state["next_metrics"],
-        st.session_state["next_feature_names"],
-    ) = load_and_train_with_progress(DATA_FILE, AGES_FILE)
-    st.rerun()
+    if os.path.exists(CACHE_FILE):
+        with st.spinner("Loading saved models from disk..."):
+            cached = joblib.load(CACHE_FILE)
+            (
+                st.session_state["df"],
+                st.session_state["team_ctx"],
+                st.session_state["has_age"],
+                st.session_state["player_profiles"],
+                st.session_state["fit_models"],
+                st.session_state["fit_metrics"],
+                st.session_state["fit_feature_names"],
+                st.session_state["next_models"],
+                st.session_state["next_metrics"],
+                st.session_state["next_feature_names"],
+            ) = cached
+    else:
+        st.info("Training models for the first time — this takes 5–8 minutes. Won't happen again until you retrain.")
+        results = load_and_train_with_progress(DATA_FILE, AGES_FILE)
+        joblib.dump(results, CACHE_FILE)
+        (
+            st.session_state["df"],
+            st.session_state["team_ctx"],
+            st.session_state["has_age"],
+            st.session_state["player_profiles"],
+            st.session_state["fit_models"],
+            st.session_state["fit_metrics"],
+            st.session_state["fit_feature_names"],
+            st.session_state["next_models"],
+            st.session_state["next_metrics"],
+            st.session_state["next_feature_names"],
+        ) = results
+        st.rerun()
 
 df                 = st.session_state["df"]
 team_ctx           = st.session_state["team_ctx"]
@@ -563,7 +749,7 @@ if player_input:
                               player_profiles, has_age, override_team=override_team)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Team Fit", "🔮 Next Season", "🔬 Model Info"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Team Fit", "🔮 Next Season", "🔬 Model Info", "✅ 2025-26 Validation"])
 
 with tab1:
     if pred:
@@ -606,6 +792,17 @@ with tab2:
         st.info("Search for a player above to see predictions.")
 
 with tab3:
+    st.markdown("#### Model Cache")
+    st.caption("Models are saved to disk and loaded instantly on reopen. Delete the cache to retrain from scratch.")
+    if st.button("🔄 Retrain model (deletes cache)"):
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+        for key in ["df","team_ctx","has_age","player_profiles","fit_models",
+                    "fit_metrics","fit_feature_names","next_models","next_metrics","next_feature_names"]:
+            st.session_state.pop(key, None)
+        st.success("Cache cleared — refresh the page to retrain.")
+
+    st.divider()
     with st.expander("Team Fit model quality", expanded=True):
         show_metrics(fit_metrics, "Team Fit")
     with st.expander("Next Season model quality", expanded=True):
@@ -614,19 +811,71 @@ with tab3:
         st.pyplot(make_importance_chart(fit_models, fit_feature_names))
     with st.expander("Next Season — feature importance"):
         st.pyplot(make_importance_chart(next_models, next_feature_names))
-    with st.expander("Diagnostics"):
-        st.markdown("**Next season model features:**")
-    st.write(next_feature_names)
-    st.markdown("**Age coverage:**")
-    st.write(f"Rows with age: {df['age'].notna().sum():,} / {len(df):,} ({df['age'].notna().mean()*100:.1f}%)")
-    st.markdown("**Age distribution:**")
-    fig, ax = plt.subplots(figsize=(8, 3))
-    fig.patch.set_facecolor("#0e1117")
-    ax.set_facecolor("#0e1117")
-    df["age"].dropna().hist(ax=ax, bins=30, color="#4a90d9", edgecolor="#0e1117")
-    ax.tick_params(colors="white")
-    ax.set_xlabel("Age", color="white")
-    ax.set_ylabel("Count", color="white")
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#333")
-    st.pyplot(fig)
+
+with tab4:
+    st.subheader("2025-26 Season Validation")
+    st.caption(
+        "Pulls live 2025-26 stats from the NHL API and compares against "
+        "the model's predictions based on each player's historical profile. "
+        "Goals and Points are converted to per-game rates using games played."
+    )
+
+    if st.button("🔄 Fetch 2025-26 stats from NHL API"):
+        st.cache_data.clear()
+
+    actual_df, err = fetch_nhl_current_season()
+
+    if err:
+        st.error(f"Could not fetch NHL API data: {err}")
+    elif actual_df is not None:
+        st.success(f"Fetched {len(actual_df):,} skaters with 10+ games played.")
+
+        with st.spinner("Comparing predictions to actual stats..."):
+            val_df = build_validation_results(
+                actual_df, df, team_ctx, fit_models, player_profiles, has_age
+            )
+
+        if val_df.empty:
+            st.warning("No players matched between NHL API and model profiles.")
+        else:
+            st.markdown(f"**{len(val_df):,} players matched**")
+
+            # Scatter plots
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig.patch.set_facecolor("#0e1117")
+            make_scatter(val_df, "actual_points_gp", "pred_points_gp", "Points / Game", axes[0])
+            make_scatter(val_df, "actual_goals_gp",  "pred_goals_gp",  "Goals / Game",  axes[1])
+            plt.tight_layout()
+            st.pyplot(fig)
+
+            # Overall MAE
+            c1, c2 = st.columns(2)
+            c1.metric("Points/GP MAE",
+                      f"{mean_absolute_error(val_df['actual_points_gp'], val_df['pred_points_gp']):.3f}")
+            c2.metric("Goals/GP MAE",
+                      f"{mean_absolute_error(val_df['actual_goals_gp'], val_df['pred_goals_gp']):.3f}")
+
+            st.divider()
+
+            # Biggest misses
+            st.markdown("#### Biggest Misses (model most wrong on Points/GP)")
+            misses = val_df.reindex(
+                val_df["points_gp_error"].abs().nlargest(15).index
+            )[["player_name","team","games_played","actual_points_gp",
+               "pred_points_gp","points_gp_error","actual_goals_gp",
+               "pred_goals_gp","seasons_used"]]
+            st.dataframe(misses, use_container_width=True)
+
+            # Best predictions
+            st.markdown("#### Best Predictions (model closest on Points/GP)")
+            best = val_df.reindex(
+                val_df["points_gp_error"].abs().nsmallest(15).index
+            )[["player_name","team","games_played","actual_points_gp",
+               "pred_points_gp","points_gp_error","actual_goals_gp",
+               "pred_goals_gp","seasons_used"]]
+            st.dataframe(best, use_container_width=True)
+
+            # Full table download
+            csv = val_df.to_csv(index=False)
+            st.download_button("⬇ Download full validation CSV", data=csv,
+                               file_name="validation_2025_26.csv", mime="text/csv")
