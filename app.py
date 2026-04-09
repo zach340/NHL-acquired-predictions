@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-DATA_FILE      = "offensive_performance_by_season_per60_renamed.csv"
+DATA_FILE      = "season_dataset.csv"
 AGES_FILE      = "player_ages.csv"
 PP_FILE        = "pp_features.csv"
 LINEMATE_FILE  = "linemate_features.csv"
@@ -193,10 +193,7 @@ def engineer_player_features(df):
     d["primary_vs_secondary"] = safe_div(d["ind_primary_assists_per60"], d["ind_secondary_assists_per60"])
     d["xg_per_attempt"]       = safe_div(d["ind_expected_goals_per60"], d["ind_shot_attempts_per60"])
     d["on_target_rate"]       = safe_div(d["ind_shots_on_goal_per60"], d["ind_shot_attempts_per60"])
-    d["toi_per_game"]         = d["ice_time"] / d["games_played"]
-    d["game_score_per_game"]  = d["game_score"] / d["games_played"]
-    d["points_per_game"]      = d["ind_points_per60"] * d["toi_per_game"] / 60
-    d["goals_per_game"]       = d["ind_goals_per60"]  * d["toi_per_game"] / 60
+    d["toi_per_game"]         = (d["ice_time"] / 60) / d["games_played"]
     # League scoring environment — lets model learn how scoring rates
     # vary by season and adjust predictions accordingly
     d["league_avg_points_pg"] = d.groupby("season")["points_per_game"].transform("mean")
@@ -493,7 +490,7 @@ def load_and_train_with_progress(path, ages_path):
     # ── Load ──────────────────────────────────────────────────────────────────
     status.markdown("⚙️ **Loading data...**")
     df   = pd.read_csv(path)
-    raw_targets = ["game_score", "ind_points_per60", "ind_goals_per60", "ice_time", "games_played"]
+    raw_targets = ["game_score_per_game", "points_per_game", "goals_per_game", "ice_time", "games_played"]
     df   = df[(df["games_played"] >= MIN_GP) & (df["ice_time"] >= MIN_ICE)].dropna(subset=raw_targets).copy()
     # Train forwards-only models.
     df   = df[df["position"].isin(FORWARD_POSITIONS)].copy()
@@ -862,13 +859,13 @@ def build_validation_results(actual_df, df, team_ctx, fit_models,
              pos_d[POSITION_DUMMIES].reset_index(drop=True)], axis=1
         ).replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        base_pts   = compute_target_baseline(pred_df, "points_per_game").values[0]
-        base_goals = compute_target_baseline(pred_df, "goals_per_game").values[0]
-        base_gs    = compute_target_baseline(pred_df, "game_score_per_game").values[0]
+        base_pts    = compute_target_baseline(pred_df, "points_per_game").values[0]
+        base_goals  = compute_target_baseline(pred_df, "goals_per_game").values[0]
+        base_gs     = compute_target_baseline(pred_df, "game_score_per_game").values[0]
 
-        pred_pts   = np.clip(base_pts + fit_models["points_per_game"]["global"].predict(X_pred)[0], 0, None)
+        pred_pts   = np.clip(base_pts   + fit_models["points_per_game"]["global"].predict(X_pred)[0], 0, None)
         pred_goals = np.clip(base_goals + fit_models["goals_per_game"]["global"].predict(X_pred)[0], 0, None)
-        pred_gs    = np.clip(base_gs + fit_models["game_score_per_game"]["global"].predict(X_pred)[0], 0, None)
+        pred_gs    = np.clip(base_gs    + fit_models["game_score_per_game"]["global"].predict(X_pred)[0], 0, None)
 
         rows.append({
             "player_name":       actual["player_name"],
@@ -877,9 +874,9 @@ def build_validation_results(actual_df, df, team_ctx, fit_models,
             "actual_points_gp": round(actual["points_per_game"], 3),
             "pred_points_gp":   round(pred_pts, 3),
             "points_gp_error":  round(actual["points_per_game"] - pred_pts, 3),
-            "actual_goals_gp":  round(actual["goals_per_game"], 3),
+            "actual_goals_gp":  round(float(actual.get("goals_per_game", 0)), 3),
             "pred_goals_gp":    round(pred_goals, 3),
-            "goals_gp_error":   round(actual["goals_per_game"] - pred_goals, 3),
+            "goals_gp_error":   round(float(actual.get("goals_per_game", 0)) - pred_goals, 3),
             "pred_gs_per_game":  round(pred_gs, 3),
             "seasons_used":      " → ".join(str(s) for s in seasons),
         })
@@ -1025,7 +1022,7 @@ def build_roster_deployment(team_code, roster_df, df, team_ctx, fit_models, play
             "nhl_team": team_code,
             "pred_game_score_gp": float(cur["pred_game_score_per_game"]),
             "pred_points_gp": float(cur["pred_points_per_game"]),
-            "pred_goals_gp": float(cur["pred_goals_per_game"]),
+            "pred_goals_gp":  float(cur.get("pred_goals_per_game", 0)),
             "best_fit_team": best_row["player_team"],
             "best_fit_points_gp": float(best_row["pred_points_per_game"]),
             "seasons_used": " -> ".join(str(s) for s in seasons),
@@ -1224,17 +1221,18 @@ with tab4:
             # Scatter plots
             fig, axes = plt.subplots(1, 2, figsize=(14, 6))
             fig.patch.set_facecolor("#0e1117")
-            make_scatter(val_df, "actual_points_gp", "pred_points_gp", "Points / Game", axes[0])
-            make_scatter(val_df, "actual_goals_gp",  "pred_goals_gp",  "Goals / Game",  axes[1])
+            make_scatter(val_df, "actual_points_gp", "pred_points_gp", "Points / Game",  axes[0])
+            make_scatter(val_df, "actual_goals_gp",  "pred_goals_gp",  "Goals / Game",   axes[1])
             plt.tight_layout()
             st.pyplot(fig)
 
             # Overall MAE
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Points/GP MAE",
                       f"{mean_absolute_error(val_df['actual_points_gp'], val_df['pred_points_gp']):.3f}")
             c2.metric("Goals/GP MAE",
                       f"{mean_absolute_error(val_df['actual_goals_gp'], val_df['pred_goals_gp']):.3f}")
+            c3.metric("Players matched", f"{len(val_df):,}")
 
             pred_range = val_df["pred_points_gp"].max() - val_df["pred_points_gp"].min()
             actual_range = val_df["actual_points_gp"].max() - val_df["actual_points_gp"].min()

@@ -1,138 +1,185 @@
-import argparse
-import os
-from typing import List
+"""
+build_season_dataset.py
+=======================
+Builds a clean season-level dataset from MoneyPuck game-level data.
+Uses unique game_id count for true games_played, derives per-game targets
+from raw counting stats, and keeps per-60 rate features for the model.
+
+Usage:
+    python build_season_dataset.py
+
+Input:  2008_to_2024_cleaned.csv         (MoneyPuck game-level, all situations)
+Output: season_dataset.csv               (clean season-level training data)
+"""
 
 import pandas as pd
+import numpy as np
 
+INPUT_FILE  = "2008_to_2024_cleaned.csv"
+OUTPUT_FILE = "season_dataset.csv"
+CHUNK_SIZE  = 100_000
 
-# Columns that identify a unique player-season with a specific team
-GROUP_KEYS: List[str] = [
-	"player_id",
-	"player_name",
-	"player_team",
-	"season",
-	"position",
+# Danger zone weights (empirically derived)
+HD_WEIGHT = 11.2
+MD_WEIGHT = 4.1
+LD_WEIGHT = 1.0
+
+# ── Load and filter to all-situation ──────────────────────────────────────────
+
+print("── Loading game-level data ──────────────────────────────────")
+chunks = []
+for i, chunk in enumerate(pd.read_csv(
+    INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE
+)):
+    chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
+    chunks.append(chunk[chunk["situation"] == "all"])
+    print(f"  Chunk {i+1} processed", end="\r")
+
+df = pd.concat(chunks, ignore_index=True)
+df = df.fillna(0)
+print(f"\n  {len(df):,} all-situation game-level rows")
+
+# ── Aggregate to season level ──────────────────────────────────────────────────
+
+print("\n── Aggregating to season level ──────────────────────────────")
+
+GROUP = ["player_id", "player_name", "season", "player_team", "position"]
+
+# Count unique game_ids for true games_played
+game_counts = (
+    df.groupby(GROUP)["game_id"]
+    .nunique()
+    .reset_index()
+    .rename(columns={"game_id": "games_played"})
+)
+
+# Sum all counting stats
+COUNT_COLS = [
+    "ice_time",
+    "shifts",
+    "game_score",
+    "ind_goals",
+    "ind_primary_assists",
+    "ind_secondary_assists",
+    "ind_points",
+    "ind_shots_on_goal",
+    "ind_missed_shots",
+    "ind_blocked_shot_attempts",
+    "ind_shot_attempts",
+    "ind_unblocked_shot_attempts",
+    "ind_expected_goals",
+    "ind_flurry_adj_expected_goals",
+    "ind_score_venue_adj_expected_goals",
+    "ind_flurry_score_venue_adj_expected_goals",
+    "ind_expected_on_goal",
+    "ind_low_danger_shots",
+    "ind_medium_danger_shots",
+    "ind_high_danger_shots",
+    "ind_low_danger_goals",
+    "ind_medium_danger_goals",
+    "ind_high_danger_goals",
+    "ind_low_danger_expected_goals",
+    "ind_medium_danger_expected_goals",
+    "ind_high_danger_expected_goals",
 ]
 
-# Game-level columns we do not need in the season aggregate
-DROP_COLUMNS: List[str] = [
-	"game_id",
-	"opposing_team",
-	"home_or_away",
-	"game_date",
-	"situation",
-]
+# Only sum columns that exist in the file
+COUNT_COLS = [c for c in COUNT_COLS if c in df.columns]
 
+season = (
+    df.groupby(GROUP)[COUNT_COLS]
+    .sum()
+    .reset_index()
+)
 
-def parse_args() -> argparse.Namespace:
-	parser = argparse.ArgumentParser(
-		description=(
-			"Aggregate per-player stats by season while the team remains the same "
-			"(sums numeric columns, counts games)."
-		)
-	)
-	parser.add_argument(
-		"--input",
-		default="offensive_performance_by_game.csv",
-		help="Input CSV with per-game stats",
-	)
-	parser.add_argument(
-		"--output",
-		default="offensive_performance_by_season.csv",
-		help="Output CSV with per-season aggregates",
-	)
-	parser.add_argument(
-		"--chunk-size",
-		type=int,
-		default=200_000,
-		help="Rows per chunk when reading input",
-	)
-	return parser.parse_args()
+# Join true games_played
+season = season.merge(game_counts, on=GROUP, how="left")
 
+print(f"  {len(season):,} player-seasons")
+print(f"  games_played range: {season['games_played'].min()} – {season['games_played'].max()}")
 
-def aggregate_file(input_path: str, output_path: str, chunk_size: int) -> None:
-	if not os.path.exists(input_path):
-		raise FileNotFoundError(f"Input CSV not found: {input_path}")
+# ── Per-game targets (clean, no per-60 conversion needed) ─────────────────────
 
-	tmp_path = f"{output_path}.tmp"
-	first_write = True
-	total_rows = 0
-	total_groups = 0
+print("\n── Computing per-game targets ───────────────────────────────")
 
-	# Prepare writers outside the loop; we will write incrementally per chunk
-	for chunk in pd.read_csv(input_path, low_memory=False, chunksize=chunk_size):
-		total_rows += len(chunk)
+gp = season["games_played"].replace(0, np.nan)
 
-		# Drop columns that do not make sense in a season aggregate
-		for col in DROP_COLUMNS:
-			if col in chunk.columns:
-				chunk = chunk.drop(columns=col)
+# Primary targets
+season["game_score_per_game"]   = season["game_score"]   / gp
+season["points_per_game"]       = season["ind_points"]   / gp
+season["goals_per_game"]        = season["ind_goals"]    / gp
 
-		missing_keys = [col for col in GROUP_KEYS if col not in chunk.columns]
-		if missing_keys:
-			raise ValueError(f"Missing required key columns: {', '.join(missing_keys)}")
+# Danger-zone weighted shot rate — same formula as EDGE, no unit mismatch
+season["weighted_shots_pg"]     = (
+    season["ind_high_danger_shots"] * HD_WEIGHT +
+    season["ind_medium_danger_shots"] * MD_WEIGHT +
+    season["ind_low_danger_shots"]  * LD_WEIGHT
+) / gp
 
-		# Add a games_played counter so we retain game counts
-		chunk["games_played"] = 1
+# ── Per-60 rate features (kept for model features, not targets) ───────────────
 
-		# Determine numeric columns to sum (exclude grouping keys)
-		numeric_cols = [
-			col
-			for col in chunk.columns
-			if col not in GROUP_KEYS and pd.api.types.is_numeric_dtype(chunk[col])
-		]
+print("── Computing per-60 rate features ───────────────────────────")
 
-		# Coerce non-numeric columns that should be numeric (in case of mixed dtypes)
-		for col in chunk.columns:
-			if col in GROUP_KEYS or col in numeric_cols:
-				continue
-			coerced = pd.to_numeric(chunk[col], errors="coerce")
-			if coerced.notna().any():
-				chunk[col] = coerced.fillna(0)
-				numeric_cols.append(col)
+# ice_time is in seconds — convert to hours for per-60
+ice_hours = season["ice_time"] / 3600
 
-		# Safety: ensure all numeric columns have no NaNs
-		chunk[numeric_cols] = chunk[numeric_cols].fillna(0)
+def per60(col):
+    return np.where(ice_hours > 0, season[col] / ice_hours, 0)
 
-		agg_dict = {col: "sum" for col in numeric_cols}
-		grouped = chunk.groupby(GROUP_KEYS, dropna=False).agg(agg_dict).reset_index()
-		total_groups += len(grouped)
+season["toi_per_game"]                              = (season["ice_time"] / 60) / gp
+season["shifts_per60"]                              = per60("shifts")
+season["ind_goals_per60"]                           = per60("ind_goals")
+season["ind_primary_assists_per60"]                 = per60("ind_primary_assists")
+season["ind_secondary_assists_per60"]               = per60("ind_secondary_assists")
+season["ind_points_per60"]                          = per60("ind_points")
+season["ind_shots_on_goal_per60"]                   = per60("ind_shots_on_goal")
+season["ind_missed_shots_per60"]                    = per60("ind_missed_shots")
+season["ind_blocked_shot_attempts_per60"]           = per60("ind_blocked_shot_attempts")
+season["ind_shot_attempts_per60"]                   = per60("ind_shot_attempts")
+season["ind_expected_goals_per60"]                  = per60("ind_expected_goals")
+season["ind_flurry_adj_expected_goals_per60"]       = per60("ind_flurry_adj_expected_goals")
+season["ind_score_venue_adj_expected_goals_per60"]  = per60("ind_score_venue_adj_expected_goals")
+season["ind_flurry_score_venue_adj_expected_goals_per60"] = per60("ind_flurry_score_venue_adj_expected_goals")
+season["ind_low_danger_shots_per60"]                = per60("ind_low_danger_shots")
+season["ind_medium_danger_shots_per60"]             = per60("ind_medium_danger_shots")
+season["ind_high_danger_shots_per60"]               = per60("ind_high_danger_shots")
+season["ind_low_danger_goals_per60"]                = per60("ind_low_danger_goals")
+season["ind_medium_danger_goals_per60"]             = per60("ind_medium_danger_goals")
+season["ind_high_danger_goals_per60"]               = per60("ind_high_danger_goals")
+season["ind_low_danger_expected_goals_per60"]       = per60("ind_low_danger_expected_goals")
+season["ind_medium_danger_expected_goals_per60"]    = per60("ind_medium_danger_expected_goals")
+season["ind_high_danger_expected_goals_per60"]      = per60("ind_high_danger_expected_goals")
 
-		grouped.to_csv(
-			tmp_path,
-			mode="w" if first_write else "a",
-			header=first_write,
-			index=False,
-		)
-		first_write = False
+# ice_time_rank — use rank within season
+season["ice_time_rank"] = season.groupby("season")["ice_time"].rank(ascending=False)
 
-	if first_write:
-		# No data was processed; write an empty file with headers.
-		pd.DataFrame(columns=GROUP_KEYS + ["games_played"]).to_csv(tmp_path, index=False)
+# ── Apply ATL→WPG and ARI→UTA renames ─────────────────────────────────────────
 
-	# Second pass: load the concatenated per-chunk aggregates and reduce again
-	final_df = pd.read_csv(tmp_path)
-	numeric_cols = [col for col in final_df.columns if col not in GROUP_KEYS]
-	final_df = (
-		final_df.groupby(GROUP_KEYS, dropna=False)[numeric_cols]
-		.sum()
-		.reset_index()
-	)
+season["player_team"] = season["player_team"].replace({"ATL": "WPG", "ARI": "UTA"})
 
-	if os.path.exists(output_path):
-		os.remove(output_path)
-	os.replace(tmp_path, output_path)
+# ── Sanity checks ──────────────────────────────────────────────────────────────
 
-	print(f"Rows read: {total_rows:,}")
-	print(f"Intermediate groups written: {total_groups:,}")
-	print(f"Final groups: {len(final_df):,}")
-	print(f"Saved to {output_path}")
+print(f"\n── Sanity checks ────────────────────────────────────────────")
+print(f"  Seasons: {sorted(season['season'].unique())}")
+print(f"  Teams: {sorted(season['player_team'].unique())}")
+print(f"  Positions: {sorted(season['position'].unique())}")
+print(f"  games_played: min={season['games_played'].min()} max={season['games_played'].max()} mean={season['games_played'].mean():.1f}")
 
+print(f"\n  Per-game target stats (forwards only):")
+fwd = season[season["position"].isin(["C","L","R"])]
+for col in ["game_score_per_game", "goals_per_game", "points_per_game", "weighted_shots_pg"]:
+    print(f"    {col:<28} mean={fwd[col].mean():.3f}  max={fwd[col].max():.3f}")
 
-def main() -> None:
-	args = parse_args()
-	aggregate_file(args.input, args.output, args.chunk_size)
+print(f"\n  Top 10 forwards by weighted_shots_pg (2024):")
+top = (
+    fwd[fwd["season"] == 2024]
+    .sort_values("weighted_shots_pg", ascending=False)
+    .head(10)
+)[["player_name", "player_team", "games_played", "weighted_shots_pg", "points_per_game"]]
+print(top.to_string(index=False))
 
+# ── Save ──────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-	main()
+season.to_csv(OUTPUT_FILE, index=False)
+print(f"\n  Saved {len(season):,} rows to {OUTPUT_FILE}")
+print(f"  Columns: {len(season.columns)}")
