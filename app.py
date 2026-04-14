@@ -79,25 +79,6 @@ if "def_fit_models" not in st.session_state:
                 st.session_state["def_next_feature_names"],
             ) = def_cached
 
-            # ── Feature count validation ──────────────────────────────────────
-            # If DEF_PLAYER_FEATURES has changed since the cache was built,
-            # the model will throw a feature count mismatch. Auto-retrain.
-            _def_has_age   = st.session_state["def_has_age"]
-            _expected_feats = (len(DEF_PLAYER_FEATURES)
-                               + (len(DEF_AGE_FEATURES) if _def_has_age else 0)
-                               + len(DEF_TEAM_FEATURES))
-            _cached_feats   = len(st.session_state["def_fit_feature_names"])
-            if _expected_feats != _cached_feats:
-                st.warning(
-                    f"Defensive model feature mismatch "
-                    f"(cache: {_cached_feats}, current: {_expected_feats}). "
-                    "Retraining automatically..."
-                )
-                os.remove(DEF_CACHE_FILE)
-                for k in list(st.session_state.keys()):
-                    if k.startswith("def_"):
-                        del st.session_state[k]
-                st.rerun()
     elif os.path.exists(DEF_FILE):
         st.info("Training defensive models for the first time — takes 3-5 minutes.")
         def_results = def_load_and_train(DEF_FILE, AGES_FILE)
@@ -155,7 +136,9 @@ if player_input:
         # Try defensive model (defensemen)
         def_first = def_predict_defenseman(
             player_input, def_df, def_team_ctx,
-            def_fit_models, def_next_models, def_player_profiles, def_has_age
+            def_fit_models, def_next_models, def_player_profiles, def_has_age,
+            fit_feature_names=def_fit_feature_names,
+            next_feature_names=def_next_feature_names
         )
         if def_first is not None:
             # Create a minimal pred dict so tabs know a defenseman is searched
@@ -306,7 +289,9 @@ with tab_def:
             with st.spinner("Computing defensive predictions..."):
                 st.session_state[_dpred_key] = def_predict_defenseman(
                     pred["matched"], def_df, def_team_ctx,
-                    def_fit_models, def_next_models, def_player_profiles, def_has_age
+                    def_fit_models, def_next_models, def_player_profiles, def_has_age,
+                    fit_feature_names=def_fit_feature_names,
+                    next_feature_names=def_next_feature_names
                 )
         dpred = st.session_state[_dpred_key]
 
@@ -358,67 +343,137 @@ with tab_def:
                 index=NHL_TEAMS.index(dpred["actual_team"]) if dpred["actual_team"] in NHL_TEAMS else 0,
                 key="pair_team_sel"
             )
-            if pc2.button("Refresh roster", key="pair_refresh"):
+            if pc2.button("Refresh roster & shifts", key="pair_refresh"):
                 def_fetch_team_roster_d.clear()
+                fetch_actual_pairs.clear()
 
-            with st.spinner(f"Building {pair_team} pairings with {dpred['matched']}..."):
+            with st.spinner(f"Fetching {pair_team} shifts and building pairings..."):
                 pair_result = def_build_pairing_insertion(
                     dpred["pid"], pair_team, def_df, def_team_ctx,
-                    def_fit_models, def_player_profiles, def_has_age
+                    def_fit_models, def_player_profiles, def_has_age,
+                    feature_names=def_fit_feature_names
                 )
 
-            if len(pair_result) == 3:
-                pairing_df, pair_err, partner = pair_result
+            # New return format: (current_pairs, unassigned, player_scores, insertion_info)
+            if isinstance(pair_result, tuple) and len(pair_result) == 4:
+                current_pairs, unassigned, player_scores, insertion = pair_result
+
+                if isinstance(current_pairs, str):
+                    # Error string returned as first element
+                    st.error(current_pairs)
+                else:
+                    searched_name  = dpred["matched"]
+                    searched_score = insertion["searched_score"]
+                    partner_name   = insertion["partner_name"]
+                    partner_slot   = insertion["partner_slot"]
+                    pushed_out     = insertion["pushed_out_name"]
+                    pair_err       = insertion.get("pair_err")
+                    missing_model_players = insertion.get("missing_model_players", [])
+
+                    if pair_err:
+                        st.caption(f"Note: Could not fetch shift data ({pair_err}). Showing model-based ranking.")
+
+                    # ── Insertion summary ──────────────────────────────────────
+                    st.markdown(
+                        f"### {searched_name} — Defensive Score: {searched_score:.1f}",
+                    )
+                    if partner_name != "—":
+                        st.success(
+                            f"Best fit: **{partner_slot}** alongside **{partner_name}**  \n"
+                            f"{'Replaces: **' + pushed_out + '**' if pushed_out != '—' else ''}"
+                        )
+
+                    # ── Current pairs table ────────────────────────────────────
+                    st.divider()
+                    st.markdown(f"#### {pair_team} Current Pairings (with model scores)")
+                    source_note = "from recent shift data" if any(p.get("from_shifts") for p in current_pairs) else "model-ranked"
+                    st.caption(f"Pairs derived {source_note}. Defensive Score: 0-100 composite (higher = better).")
+
+                    SLOT_COLORS_PAIRS = {
+                        "1st Pair": "#FFD700",
+                        "2nd Pair": "#4a90d9",
+                        "3rd Pair": "#57a85a",
+                        "4th Pair": "#888888",
+                    }
+
+                    for i, pair in enumerate(current_pairs):
+                        slot_label = pair.get("slot", f"Pair {i+1}")
+                        color      = SLOT_COLORS_PAIRS.get(slot_label.split()[0] + " " + slot_label.split()[1] if len(slot_label.split()) >= 2 else slot_label, "#888888")
+                        is_target_pair = (pair.get("pid1") == (insertion.get("best_partner_pid")) or
+                                          pair.get("pid2") == (insertion.get("best_partner_pid")))
+
+                        col_slot, col_p1, col_vs, col_p2, col_score = st.columns([1.2, 2, 0.3, 2, 1.2])
+                        col_slot.markdown(f"<span style='color:{color};font-weight:bold'>{slot_label}</span>", unsafe_allow_html=True)
+                        col_p1.markdown(f"**{pair['name1']}** ({pair['score1']:.0f})")
+                        col_vs.markdown("—")
+                        col_p2.markdown(f"**{pair['name2']}** ({pair['score2']:.0f})")
+                        col_score.markdown(f"Pair avg: **{pair['pair_score']:.0f}**")
+
+                    # ── Searched player row ────────────────────────────────────
+                    st.divider()
+                    st.markdown("#### Where the searched player fits")
+                    sp_col1, sp_col2, sp_col3 = st.columns([2, 2, 2])
+                    sp_col1.metric("Player", searched_name)
+                    sp_col2.metric("Defensive Score", f"{searched_score:.1f}")
+                    sp_col3.metric("Best Pair Slot", partner_slot)
+
+                    if partner_name != "—":
+                        st.info(
+                            f"**{searched_name}** (score {searched_score:.0f}) would pair best with "
+                            f"**{partner_name}** in the **{partner_slot}**."
+                            + (f"  \nThis would push **{pushed_out}** to a different role." if pushed_out != "—" else "")
+                        )
+
+                    # ── Coverage diagnostics ───────────────────────────────────
+                    if missing_model_players:
+                        with st.expander(f"{len(missing_model_players)} rostered D-men not in model data"):
+                            for p in missing_model_players:
+                                st.caption(f"• {p.get('player_name', str(p.get('player_id')))} — not enough historical seasons in training data")
+
+                    if unassigned:
+                        with st.expander(f"{len(unassigned)} rostered D-men in model but not found in recent shift pair data"):
+                            for pid in unassigned:
+                                name = player_scores.get(pid, {}).get("player_name", str(pid))
+                                st.caption(f"• {name} — no recent shared-shift pairing found")
+
+                    # ── Full scores table ──────────────────────────────────────
+                    with st.expander("Full model scores for all D-men"):
+                        rows_table = []
+                        for pid, info in player_scores.items():
+                            rows_table.append({
+                                "Player":    info["player_name"],
+                                "Def Score": info["defensive_score"],
+                                "Hits/GP":   round(info.get("ind_hits_pg", 0), 2),
+                                "TK/GP":     round(info.get("ind_takeaways_pg", 0), 3),
+                                "GA/GP":     round(info.get("goals_against_per_game", 0), 3),
+                                "PK%":       round(info.get("pk_ice_pct", 0) * 100, 1),
+                                "PIM/GP":    round(info.get("pim_pg", 0), 2),
+                                "Is New Player": info.get("is_searched_player", False),
+                            })
+                        scores_df = pd.DataFrame(rows_table).sort_values("Def Score", ascending=False)
+                        display_scores_df = scores_df.drop(columns=["Is New Player"], errors="ignore")
+
+                        def _hi_new(row):
+                            is_new = False
+                            if "Is New Player" in scores_df.columns:
+                                is_new = bool(scores_df.loc[row.name, "Is New Player"])
+                            if is_new:
+                                return ["background-color:#FFD70022;font-weight:bold"] * len(row)
+                            return [""] * len(row)
+
+                        st.dataframe(
+                            display_scores_df.style.apply(_hi_new, axis=1),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        csv_rows = pd.DataFrame(rows_table).to_csv(index=False)
+                        st.download_button("Download pairing CSV", data=csv_rows,
+                                           file_name=f"{dpred['matched'].replace(' ','_')}_{pair_team}_pairing.csv",
+                                           mime="text/csv")
             else:
-                pairing_df, pair_err = pair_result
-                partner = "—"
-
-            if pair_err:
-                st.error(pair_err)
-            elif pairing_df is not None and not pairing_df.empty:
-                searched_row = pairing_df[pairing_df["is_searched_player"]].iloc[0]
-                slot  = searched_row["pair_slot"]
-                rank  = int(searched_row["rank"])
-                color = searched_row["slot_color"]
-                score = searched_row["defensive_score"]
-                total = len(pairing_df)
-                st.markdown(
-                    f"<h3 style='color:{color}'>"
-                    f"{dpred['matched']} projects as <b>{slot}</b> on {pair_team} "
-                    f"(rank {rank}/{total} | Def Score: {score:.1f})"
-                    f"</h3>",
-                    unsafe_allow_html=True
-                )
-                if partner != "—":
-                    st.info(f"Projected pairing partner: **{partner}**")
-                display = pairing_df[[
-                    "rank","player_name","pair_slot","defensive_score",
-                    "ind_hits_pg","ind_takeaways_pg","goals_against_per_game","pk_ice_pct"
-                ]].copy()
-                display.columns = ["Rank","Player","Pair Slot","Def Score",
-                                   "Hits/GP","TK/GP","GA/GP","PK%"]
-                display["Def Score"] = display["Def Score"].round(1)
-                display["Hits/GP"]   = display["Hits/GP"].round(2)
-                display["TK/GP"]     = display["TK/GP"].round(3)
-                display["GA/GP"]     = display["GA/GP"].round(3)
-                display["PK%"]       = (display["PK%"] * 100).round(1)
-                def _hi_pair(row):
-                    m = pairing_df.loc[pairing_df["player_name"]==row["Player"],"is_searched_player"].values
-                    if len(m)>0 and m[0]:
-                        return [f"background-color:{color}22;font-weight:bold;border-left:3px solid {color}"]*len(row)
-                    return [""]*len(row)
-                st.dataframe(display.style.apply(_hi_pair,axis=1),
-                             use_container_width=True,
-                             height=min(50+len(display)*35,500))
-                slot_counts = display["Pair Slot"].value_counts()
-                st.markdown("**Pair breakdown after insertion:**")
-                sc = st.columns(4)
-                for c_s, lbl in zip(sc, ["1st Pair","2nd Pair","3rd Pair","3rd Pair (extra)"]):
-                    c_s.metric(lbl, int(slot_counts.get(lbl,0)))
-                csv = pairing_df.drop(columns=["slot_color"]).to_csv(index=False)
-                st.download_button("Download pairing CSV", data=csv,
-                                   file_name=f"{dpred['matched'].replace(' ','_')}_{pair_team}_pairing.csv",
-                                   mime="text/csv")
+                # Fallback for unexpected return format
+                st.error("Unexpected result from pairing function. Try refreshing.")
 
 # ── Contract Evaluator ────────────────────────────────────────────────────────
 with tab_contract:
@@ -442,10 +497,30 @@ with tab_contract:
             index=NHL_TEAMS.index(pred["actual_team"]) if pred["actual_team"] in NHL_TEAMS else 0,
             key="contract_team"
         )
-        curr_age = float(pred.get("age") or (
-            def_player_profiles[pred["pid"]][0].get("age", 28)
-            if is_d_contract and def_models_loaded else 28
-        ) or 28)
+        # Resolve current age — try pred dict, then profile, then ages CSV directly
+        _pid = pred.get("pid")
+        curr_age = pred.get("age")
+
+        if not curr_age and is_d_contract and def_models_loaded:
+            # Defensive profiles may not carry age if model trained without age features
+            _prof = def_player_profiles.get(_pid, (None,))[0]
+            if _prof is not None:
+                curr_age = _prof.get("age")
+
+        if not curr_age and os.path.exists(AGES_FILE):
+            # Direct lookup from player_ages.csv — most reliable source
+            try:
+                _ages_df = pd.read_csv(AGES_FILE)
+                _row = _ages_df[_ages_df["player_id"] == _pid].sort_values("season", ascending=False)
+                if not _row.empty and pd.notna(_row.iloc[0].get("age")):
+                    _latest_season = int(_row.iloc[0]["season"])
+                    _base_age = float(_row.iloc[0]["age"])
+                    # Adjust to current season if the latest row isn't current
+                    curr_age = _base_age + max(0, 2026 - _latest_season)
+            except Exception:
+                pass
+
+        curr_age = float(curr_age) if curr_age and not (isinstance(curr_age, float) and curr_age != curr_age) else 28.0
 
         # CBA limits based on signing team
         cba = get_cba_limits(curr_age, pred["actual_team"], contract_team)
@@ -495,7 +570,8 @@ with tab_contract:
                 def_fit_models if def_models_loaded else {},
                 def_player_profiles if def_models_loaded else {},
                 def_has_age if def_models_loaded else False,
-                contract_team, n_years
+                contract_team, n_years,
+                def_fit_feature_names=def_fit_feature_names if def_models_loaded else None
             )
 
         if proj_err:
@@ -523,7 +599,7 @@ with tab_contract:
                     "Takeaways/GP":  r["takeaways_pg"],
                     "GA/GP (5v5)":   r["goals_against_pg"],
                     "PK%":           f"{r['pk_pct']*100:.1f}%",
-                    "Penalties/GP":  r["penalties_pg"],
+                    "PIM/GP":        r["pim_pg"],
                     "Def Score":     r["def_score"],
                     "Confidence":    f"{r['confidence']*100:.0f}%",
                 } for r in proj_rows])
@@ -768,43 +844,63 @@ with tab_val:
                 with st.spinner("Comparing predictions to actual stats..."):
                     def_val_df = build_defensive_validation(
                         def_actual_d, def_df, def_team_ctx,
-                        def_fit_models, def_player_profiles, def_has_age
+                        def_fit_models, def_player_profiles, def_has_age,
+                        feature_names=def_fit_feature_names
                     )
                 if def_val_df.empty:
                     st.warning("No defensemen matched between NHL API and model profiles.")
                 else:
                     st.markdown(f"**{len(def_val_df):,} defensemen matched**")
 
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Hits/GP MAE",
-                              f"{mean_absolute_error(def_val_df['actual_hits_pg'], def_val_df['pred_hits_pg']):.3f}")
-                    c2.metric("Takeaways/GP MAE",
-                              f"{mean_absolute_error(def_val_df['actual_tk_pg'], def_val_df['pred_tk_pg']):.3f}")
-                    has_pk = "actual_pk_pct" in def_val_df.columns and def_val_df["actual_pk_pct"].sum() > 0
-                    if has_pk:
-                        c3.metric("PK% MAE",
-                                  f"{mean_absolute_error(def_val_df['actual_pk_pct'], def_val_df['pred_pk_pct']):.4f}")
-                    c4.metric("Defensemen matched", f"{len(def_val_df):,}")
-                    st.caption("Penalties/GP omitted — NHL API penalty_minutes differs from MoneyPuck penalty count.")
+                    has_pk  = "actual_pk_pct" in def_val_df.columns and def_val_df["actual_pk_pct"].sum() > 0
+                    has_pim = "actual_pim_pg" in def_val_df.columns and def_val_df["actual_pim_pg"].sum() > 0
 
-                    n_plots = 3 if has_pk else 2
-                    fig, axes = plt.subplots(1, n_plots, figsize=(7*n_plots, 6))
-                    if n_plots == 2:
-                        axes = list(axes)
-                    fig.patch.set_facecolor("#0e1117")
-                    make_scatter(def_val_df, "actual_hits_pg", "pred_hits_pg", "Hits / Game",      axes[0])
-                    make_scatter(def_val_df, "actual_tk_pg",   "pred_tk_pg",   "Takeaways / Game", axes[1])
+                    metric_cols = st.columns(5)
+                    metric_cols[0].metric("Hits/GP MAE",
+                              f"{mean_absolute_error(def_val_df['actual_hits_pg'], def_val_df['pred_hits_pg']):.3f}")
+                    metric_cols[1].metric("Takeaways/GP MAE",
+                              f"{mean_absolute_error(def_val_df['actual_tk_pg'], def_val_df['pred_tk_pg']):.3f}")
                     if has_pk:
-                        make_scatter(def_val_df, "actual_pk_pct", "pred_pk_pct", "PK Ice %", axes[2])
+                        metric_cols[2].metric("PK% MAE",
+                                  f"{mean_absolute_error(def_val_df['actual_pk_pct'], def_val_df['pred_pk_pct']):.4f}")
+                    if has_pim:
+                        metric_cols[3].metric("PIM/GP MAE",
+                                  f"{mean_absolute_error(def_val_df['actual_pim_pg'], def_val_df['pred_pim_pg']):.3f}")
+                    metric_cols[4].metric("Defensemen matched", f"{len(def_val_df):,}")
+                    st.caption("PIM/GP: actual = penaltyMinutes/GP from NHL API, predicted = ind_penalty_minutes_pg from MoneyPuck.")
+
+                    # Always show 2x2 grid — all 4 metrics
+                    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+                    fig.patch.set_facecolor("#0e1117")
+                    make_scatter(def_val_df, "actual_hits_pg", "pred_hits_pg", "Hits / Game",      axes[0][0])
+                    make_scatter(def_val_df, "actual_tk_pg",   "pred_tk_pg",   "Takeaways / Game", axes[0][1])
+                    if has_pk:
+                        make_scatter(def_val_df, "actual_pk_pct", "pred_pk_pct", "PK Ice %",   axes[1][0])
+                    else:
+                        axes[1][0].set_facecolor("#0e1117")
+                        axes[1][0].text(0.5, 0.5, "PK% data not available\nfrom NHL API",
+                                        ha="center", va="center", color="white", fontsize=12,
+                                        transform=axes[1][0].transAxes)
+                        axes[1][0].set_title("PK Ice %", color="white")
+                    if has_pim:
+                        make_scatter(def_val_df, "actual_pim_pg", "pred_pim_pg", "PIM / Game", axes[1][1])
+                    else:
+                        axes[1][1].set_facecolor("#0e1117")
+                        axes[1][1].text(0.5, 0.5, "PIM data not available\nfrom NHL API",
+                                        ha="center", va="center", color="white", fontsize=12,
+                                        transform=axes[1][1].transAxes)
+                        axes[1][1].set_title("PIM / Game", color="white")
                     plt.tight_layout()
                     st.pyplot(fig)
+                    plt.close()
 
                     st.divider()
                     st.markdown("#### Biggest Misses (Hits/GP)")
                     miss_cols = ["player_name","team","games_played",
                                  "actual_hits_pg","pred_hits_pg","hits_error",
                                  "actual_tk_pg","pred_tk_pg","tk_error",
-                                 "actual_pk_pct","pred_pk_pct","seasons_used"]
+                                 "actual_pk_pct","pred_pk_pct",
+                                 "actual_pim_pg","pred_pim_pg","seasons_used"]
                     misses = def_val_df.reindex(def_val_df["hits_error"].abs().nlargest(15).index)[
                         [c for c in miss_cols if c in def_val_df.columns]]
                     st.dataframe(misses, use_container_width=True)

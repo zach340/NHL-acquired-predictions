@@ -22,7 +22,7 @@ SEASONS = [
     "20072008", "20082009", "20092010", "20102011", "20112012",
     "20122013", "20132014", "20142015", "20152016", "20162017",
     "20172018", "20182019", "20192020", "20202021", "20212022",
-    "20222023", "20232024",
+    "20222023", "20232024", "20242025", "20252026",
 ]
 
 # NHL season starts in October — use Oct 1 as age reference date
@@ -49,12 +49,12 @@ def fetch_skater_bios(season: str) -> pd.DataFrame:
         df["season_str"] = season
         return df[["playerId", "player_name", "birthDate", "season_str"]]
     except Exception as e:
-        print(f"  ⚠️  Failed for season {season}: {e}")
+        print(f"  Warning: Failed for season {season}: {e}")
         return pd.DataFrame()
 
 
 def season_str_to_year(season_str: str) -> int:
-    """Convert '20232024' → 2024 (the season label used in your dataset)."""
+    """Convert '20232024' -> 2024 (the season label used in your dataset)."""
     return int(season_str[4:])
 
 
@@ -91,11 +91,11 @@ def main():
     combined = pd.concat(all_rows, ignore_index=True)
 
     # Add season year and age
-    combined["season"]     = combined["season_str"].apply(season_str_to_year)
-    combined["age"]        = combined.apply(
+    combined["season"] = combined["season_str"].apply(season_str_to_year)
+    combined["age"]    = combined.apply(
         lambda r: calc_age(r["birthDate"], r["season"]), axis=1
     )
-    combined["age_sq"]     = combined["age"] ** 2  # for curve fitting
+    combined["age_sq"] = combined["age"] ** 2
 
     # Rename to match your dataset
     combined = combined.rename(columns={"playerId": "player_id"})
@@ -105,11 +105,25 @@ def main():
         subset=["player_id", "season"]
     ).sort_values(["player_id", "season"])
 
+    # ── Fill any remaining missing ages via birthDate interpolation ────────────
+    # For players with a known birthDate but missing age (e.g. new season),
+    # compute age directly from birthDate rather than leaving NaN.
+    missing_mask = result["age"].isna() & result["birthDate"].notna()
+    if missing_mask.any():
+        result.loc[missing_mask, "age"] = result.loc[missing_mask].apply(
+            lambda r: calc_age(r["birthDate"], r["season"]), axis=1
+        )
+        result.loc[result["age"].notna(), "age_sq"] = result.loc[result["age"].notna(), "age"] ** 2
+        print(f"  Filled {missing_mask.sum()} missing ages from birthDate.")
+
     result.to_csv(OUTPUT_FILE, index=False)
     print(f"\n── Done ─────────────────────────────────────────────────")
     print(f"  {len(result):,} player-season rows saved to {OUTPUT_FILE}")
     print(f"  {result['player_id'].nunique():,} unique players")
-    print(f"  Age range: {result['age'].min()} – {result['age'].max()}")
+    print(f"  Age range: {result['age'].min()} to {result['age'].max()}")
+    missing_ages = result["age"].isna().sum()
+    if missing_ages:
+        print(f"  Warning: {missing_ages} rows still missing age (no birthDate in API).")
 
 
 if __name__ == "__main__":
