@@ -31,6 +31,7 @@ PP_FILE        = "pp_features.csv"
 LINEMATE_FILE  = "linemate_features.csv"
 CACHE_FILE     = "trained_models_forwards_v5.joblib"
 DEF_FILE       = "defensive_dataset.csv"
+OFF_FILE       = "season_dataset.csv"    # shared with offensive model — contains D-men too
 
 # Danger zone weights (empirically derived from historical conversion rates)
 HD_WEIGHT = 11.2
@@ -65,10 +66,6 @@ ROLE_LABELS = {
 }
 
 FORWARD_POSITIONS = ["C", "L", "R"]
-
-# Position display mapping: MoneyPuck/model codes → NHL display codes
-MODEL_TO_NHL_POS = {"C": "C", "L": "LW", "R": "RW", "D": "D"}
-NHL_TO_MODEL_POS = {"C": "C", "LW": "L", "RW": "R", "L": "L", "R": "R", "D": "D"}
 
 TARGET_LABELS = {
     "game_score_per_game": "Game Score / Game",
@@ -942,11 +939,12 @@ def build_validation_results(actual_df, df, team_ctx, fit_models,
 def fetch_nhl_defensive_stats():
     """
     Pull 2025-26 defenseman stats from the NHL API.
-    Merges realtime endpoint (hits, takeaways, penalties) with
+    Merges realtime endpoint (hits, takeaways) with
+    summary endpoint (penalty minutes) and
     timeonice endpoint (PK time) to validate all 5 defensive targets.
     """
     try:
-        # ── Realtime stats (hits, takeaways, giveaways, penalties) ────────────
+        # ── Realtime stats (hits, takeaways, giveaways) ───────────────────────
         rt_url = (
             "https://api.nhle.com/stats/rest/en/skater/realtime"
             "?limit=-1&start=0"
@@ -967,12 +965,11 @@ def fetch_nhl_defensive_stats():
             "blockedShots":     "blocked_shots",
             "takeaways":        "takeaways",
             "giveaways":        "giveaways",
-            "penaltyMinutes":   "penalty_minutes",
             "gamesPlayed":      "games_played",
         })
         rt_df = rt_df[[c for c in ["player_id","player_name","position","hits",
                                     "blocked_shots","takeaways","giveaways",
-                                    "penalty_minutes","games_played"]
+                                    "games_played"]
                        if c in rt_df.columns]].copy()
         # Filter to defensemen only
         if "position" in rt_df.columns:
@@ -980,6 +977,31 @@ def fetch_nhl_defensive_stats():
         rt_df = rt_df.dropna(subset=["player_id","games_played"])
         rt_df = rt_df[rt_df["games_played"] >= 10]
         rt_df["player_id"] = rt_df["player_id"].astype(int)
+
+        # ── Summary stats (PIM) ────────────────────────────────────────────────
+        sum_url = (
+            "https://api.nhle.com/stats/rest/en/skater/summary"
+            "?limit=-1&start=0"
+            "&cayenneExp=seasonId=20252026"
+        )
+        sum_resp = requests.get(sum_url, timeout=15)
+        sum_resp.raise_for_status()
+        sum_data = sum_resp.json().get("data", [])
+        sum_df   = pd.json_normalize(sum_data)
+        if not sum_df.empty:
+            sum_df = sum_df.rename(columns={
+                "playerId":       "player_id",
+                "positionCode":   "position",
+                "penaltyMinutes": "penalty_minutes",
+            })
+            sum_cols = [c for c in ["player_id", "position", "penalty_minutes"] if c in sum_df.columns]
+            sum_df = sum_df[sum_cols].copy()
+            if "position" in sum_df.columns:
+                sum_df = sum_df[sum_df["position"] == "D"]
+            sum_df["player_id"] = sum_df["player_id"].astype(int)
+            rt_df = rt_df.merge(sum_df[["player_id", "penalty_minutes"]], on="player_id", how="left")
+        else:
+            rt_df["penalty_minutes"] = np.nan
 
         # ── Time on ice stats (PK time) ────────────────────────────────────────
         toi_url = (
@@ -1090,16 +1112,9 @@ def make_scatter(val_df, actual_col, pred_col, label, ax):
 
 
 def normalize_roster_position(raw_pos):
-    """Return the NHL display position (LW/RW/C/D). Use NHL_TO_MODEL_POS to get model code."""
-    p = str(raw_pos).upper().strip()
-    if p in {"LW", "L"}:
-        return "LW"
-    if p in {"RW", "R"}:
-        return "RW"
-    if p == "C":
-        return "C"
-    if p == "D":
-        return "D"
+    p = str(raw_pos).upper()
+    if p in {"C", "L", "R", "LW", "RW"}:
+        return "L" if p == "LW" else "R" if p == "RW" else p
     return None
 
 
@@ -1109,21 +1124,19 @@ def parse_roster_entries(entries, team_code):
         pid = p.get("id") or p.get("playerId")
         if pid is None:
             continue
-        nhl_pos = normalize_roster_position(p.get("positionCode") or p.get("position"))
-        if nhl_pos is None:
+        pos = normalize_roster_position(p.get("positionCode") or p.get("position"))
+        if pos is None:
             continue
-        model_pos = NHL_TO_MODEL_POS.get(nhl_pos)  # LW→L, RW→R, C→C, D→D
         first = p.get("firstName", {}).get("default") if isinstance(p.get("firstName"), dict) else p.get("firstName")
         last = p.get("lastName", {}).get("default") if isinstance(p.get("lastName"), dict) else p.get("lastName")
         full_name = p.get("fullName") or " ".join([str(first or "").strip(), str(last or "").strip()]).strip()
         if not full_name:
             full_name = str(p.get("name", "Unknown Player"))
         rows.append({
-            "player_id":    int(pid),
-            "player_name":  full_name,
-            "nhl_position": nhl_pos,    # display: LW / RW / C / D
-            "position":     model_pos,  # model:   L  / R  / C / D
-            "nhl_team":     team_code,
+            "player_id": int(pid),
+            "player_name": full_name,
+            "position": pos,
+            "nhl_team": team_code,
         })
     return rows
 
@@ -1244,10 +1257,12 @@ SLOT_COLORS = {
 }
 
 FWD_SLOT_MAP = {
-    1: "1st Line", 2: "1st Line",  3: "1st Line",
-    4: "2nd Line", 5: "2nd Line",  6: "2nd Line",
-    7: "3rd Line", 8: "3rd Line",  9: "3rd Line",
-    10: "4th Line", 11: "4th Line", 12: "4th Line",
+    1: "1st Line", 2: "1st Line",
+    3: "2nd Line", 4: "2nd Line",
+    5: "3rd Line", 6: "3rd Line",
+    7: "4th Line", 8: "4th Line",
+    9: "4th Line", 10: "4th Line",
+    11: "4th Line", 12: "4th Line",
 }
 
 DEF_SLOT_MAP = {
@@ -1279,15 +1294,13 @@ def build_player_insertion(player_id, team_code, df, team_ctx,
         return None, "Player profile not found in model data."
 
     searched_profile, searched_seasons = player_profiles[player_id]
-    model_pos = searched_profile.get("position", "C")   # L / R / C / D (MoneyPuck)
-    is_fwd    = model_pos in ("C", "L", "R")
-    # Accept both model codes and NHL display codes in the roster filter
-    model_fwd_group = {"C", "L", "R"}
-    nhl_fwd_group   = {"C", "LW", "RW"}
+    position = searched_profile.get("position", "C")
+    is_fwd   = position in ("C", "L", "R")
+    pos_group = {"C", "L", "R"} if is_fwd else {"D"}
 
     team_row = latest_ctx[
         (latest_ctx["player_team"] == team_code) &
-        (latest_ctx["position"] == model_pos)
+        (latest_ctx["position"] == position)
     ]
     if team_row.empty:
         return None, f"No team context found for {team_code}."
@@ -1318,17 +1331,13 @@ def build_player_insertion(player_id, team_code, df, team_ctx,
         raw      = fit_models["goals_per_game"]["global"].predict(X)[0]
         return float(np.clip(baseline + raw, 0, None))
 
-    # NHL display position for the searched player (LW / RW / C)
-    searched_nhl_pos = MODEL_TO_NHL_POS.get(model_pos, model_pos)
-
     rows = []
 
     # Add searched player
     rows.append({
         "player_id":           player_id,
         "player_name":         searched_profile.get("player_name", "Selected Player"),
-        "position":            model_pos,
-        "nhl_position":        searched_nhl_pos,
+        "position":            position,
         "pred_points_gp":      predict_pts(searched_profile),
         "pred_goals_gp":       predict_goals(searched_profile),
         "is_searched_player":  True,
@@ -1337,24 +1346,17 @@ def build_player_insertion(player_id, team_code, df, team_ctx,
     # Add rostered players in same position group
     for _, rp in roster_df.iterrows():
         pid = int(rp["player_id"])
-        rp_model_pos = rp.get("position")       # L / R / C from parse_roster_entries
-        rp_nhl_pos   = rp.get("nhl_position")   # LW / RW / C from NHL API
-        # Accept both coding conventions in case nhl_position is absent
-        in_group = (rp_model_pos in model_fwd_group) if is_fwd else (rp_model_pos == "D")
-        if not in_group:
-            in_group = (rp_nhl_pos in nhl_fwd_group) if is_fwd else (rp_nhl_pos == "D")
-        if not in_group:
+        if rp.get("position") not in pos_group:
             continue
         if pid == player_id:
-            continue
+            continue  # already added above
         if pid not in player_profiles:
             continue
         profile, _ = player_profiles[pid]
         rows.append({
             "player_id":          pid,
             "player_name":        rp["player_name"],
-            "position":           rp_model_pos or model_pos,
-            "nhl_position":       rp_nhl_pos or MODEL_TO_NHL_POS.get(rp_model_pos, rp_model_pos),
+            "position":           rp.get("position", position),
             "pred_points_gp":     predict_pts(profile),
             "pred_goals_gp":      predict_goals(profile),
             "is_searched_player": False,
@@ -1363,86 +1365,20 @@ def build_player_insertion(player_id, team_code, df, team_ctx,
     if not rows:
         return None, "No players could be matched."
 
-    if not is_fwd:
-        # Defensemen: simple rank by predicted score
-        result = (
-            pd.DataFrame(rows)
-            .sort_values("pred_points_gp", ascending=False)
-            .reset_index(drop=True)
-        )
-        result["rank"] = result.index + 1
-        result["lineup_slot"] = result["rank"].apply(
-            lambda r: DEF_SLOT_MAP.get(r, "3rd Pair (extra)")
-        )
-    else:
-        # ── Position-aware line building ──────────────────────────────────────
-        # Split forwards into LW / C / RW groups, rank within each,
-        # then build lines with one player per position per line.
-        # Use line_adj_xg_per60 from MoneyPuck (already in player profiles)
-        # as a secondary signal alongside predicted points/gp.
-        def _line_score(row):
-            pts    = row.get("pred_points_gp", 0)
-            lm_xg  = float(row.get("line_adj_xg_per60", 0) or 0)
-            # Blend: 85% predicted output, 15% historical line quality
-            return pts * 0.85 + lm_xg * 0.15
+    result = (
+        pd.DataFrame(rows)
+        .sort_values("pred_points_gp", ascending=False)
+        .reset_index(drop=True)
+    )
+    result["rank"] = result.index + 1
 
-        by_pos = {"LW": [], "C": [], "RW": []}
-        for r in rows:
-            p = r.get("nhl_position", "")
-            if p in by_pos:
-                by_pos[p].append(r)
-            else:
-                # Fall back: map model position if nhl_position is missing
-                mp = r.get("position", "")
-                mapped = MODEL_TO_NHL_POS.get(mp, "")
-                if mapped in by_pos:
-                    by_pos[mapped].append(r)
-
-        # Sort each position group by composite line score
-        for pos in by_pos:
-            # Attach line metrics from player profile if available
-            for r in by_pos[pos]:
-                pid = r.get("player_id")
-                if pid and pid in player_profiles:
-                    prof, _ = player_profiles[pid]
-                    r["line_adj_xg_per60"] = float(prof.get("line_adj_xg_per60", 0) or 0)
-                    r["line_corsi_pct"]    = float(prof.get("line_corsi_pct",    0) or 0)
-            by_pos[pos].sort(key=_line_score, reverse=True)
-
-        # Build up to 4 lines: each line gets the Nth-ranked LW + C + RW
-        LINE_LABELS = ["1st Line", "2nd Line", "3rd Line", "4th Line"]
-        assigned_rows = []
-        max_depth = max(len(v) for v in by_pos.values()) if any(by_pos.values()) else 0
-
-        for line_idx in range(min(max_depth, 4)):
-            line_label = LINE_LABELS[line_idx]
-            for pos in ("LW", "C", "RW"):
-                group = by_pos[pos]
-                if line_idx < len(group):
-                    group[line_idx]["lineup_slot"] = line_label
-                    assigned_rows.append(group[line_idx])
-
-        # Any overflow (5th+ LW etc.) labelled 4th Line
-        for pos in by_pos:
-            for r in by_pos[pos][4:]:
-                r["lineup_slot"] = "4th Line"
-                assigned_rows.append(r)
-
-        if not assigned_rows:
-            # Fallback to flat sort if position data is missing
-            assigned_rows = sorted(rows, key=lambda r: r.get("pred_points_gp", 0), reverse=True)
-            for i, r in enumerate(assigned_rows):
-                r["lineup_slot"] = FWD_SLOT_MAP.get(i + 1, "4th Line")
-
-        result = pd.DataFrame(assigned_rows).reset_index(drop=True)
-        result["rank"] = result.index + 1
-
-    result["slot_color"]     = result["lineup_slot"].map(SLOT_COLORS).fillna("#888888")
+    slot_map = FWD_SLOT_MAP if is_fwd else DEF_SLOT_MAP
+    result["lineup_slot"] = result["rank"].apply(
+        lambda r: slot_map.get(r, "4th Line" if is_fwd else "3rd Pair (extra)")
+    )
+    result["slot_color"] = result["lineup_slot"].map(SLOT_COLORS).fillna("#888888")
     result["pred_points_gp"] = result["pred_points_gp"].round(3)
     result["pred_goals_gp"]  = result["pred_goals_gp"].round(3)
-
-    if "nhl_position" not in result.columns:
-        result["nhl_position"] = result["position"].map(MODEL_TO_NHL_POS).fillna(result["position"])
 
     return result, None
 
@@ -1591,9 +1527,9 @@ def show_defensive_profile(player_id, player_name, def_df):
     d2.metric("HD Shots Against/60",fmt(row.get("hd_shots_against_per60_5v5"), 2),
               f"p{pct_rank('hd_shots_against_per60_5v5', higher_better=False):.0f}"
               if pct_rank("hd_shots_against_per60_5v5") is not None else None)
-    d3.metric("xGA/60 (Zone Adj)", fmt(row.get("xga_per60_zone_adj") or row.get("goals_against_per60"), 2),
-              f"p{pct_rank('xga_per60_zone_adj', higher_better=False):.0f}"
-              if pct_rank("xga_per60_zone_adj") is not None else None)
+    d3.metric("xGA Against / 60", fmt(row.get("xg_against_per60_5v5"), 2),
+              f"p{pct_rank('xg_against_per60_5v5', higher_better=False):.0f}"
+              if pct_rank("xg_against_per60_5v5") is not None else None)
     d4.metric("5v5 Corsi %",        fmt(row.get("on_ice_corsi_pct"), 1),
               f"p{pct_rank('on_ice_corsi_pct'):.0f}"
               if pct_rank("on_ice_corsi_pct") is not None else None)
@@ -1661,6 +1597,96 @@ def show_defensive_profile(player_id, player_name, def_df):
 # DEFENSIVE MODEL — Defensemen prediction engine
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Defensive offensive stats loader ──────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def load_defensive_offensive_stats():
+    """
+    Load offensive stats for defensemen from season_dataset.csv.
+    Returns dict: player_id -> {points_pg, goals_pg, game_score_pg, pp_pct, season}
+    """
+    try:
+        df = pd.read_csv(OFF_FILE)
+        df = df[df["position"] == "D"].copy()
+        # Get most recent season for each player
+        df = df.sort_values("season", ascending=False)
+        df = df.groupby("player_id").first().reset_index()
+        result = {}
+        for _, row in df.iterrows():
+            result[int(row["player_id"])] = {
+                "points_pg":      float(row.get("points_per_game",   0) or 0),
+                "goals_pg":       float(row.get("goals_per_game",    0) or 0),
+                "game_score_pg":  float(row.get("game_score_per_game", 0) or 0),
+                "pp_icetime_pct": float(row.get("pp_icetime_pct",   0) or 0),
+                "season":         int(row.get("season", 2024)),
+            }
+        return result, None
+    except Exception as e:
+        return {}, str(e)
+
+
+def grade_offensive_defenseman(off_stats, season_off_df=None):
+    """
+    Grade a defenseman's offensive production on A-F scale
+    relative to 2024 D-man percentiles:
+      pts/gp: p25=0.14, p50=0.24, p75=0.36, p90=0.56, max=1.15
+      gs/gp:  p25=0.11, p50=0.26, p75=0.43, p90=0.69, max=1.50
+    """
+    pts = off_stats.get("points_pg", 0)
+    gs  = off_stats.get("game_score_pg", 0)
+
+    # Score 0-100 based on percentile thresholds
+    def pct_score(val, p25, p50, p75, p90, p_max):
+        if val >= p_max * 0.85: return 95
+        if val >= p90:          return 85
+        if val >= p75:          return 70
+        if val >= p50:          return 55
+        if val >= p25:          return 38
+        return max(0, val / p25 * 30)
+
+    pts_score = pct_score(pts, 0.14, 0.24, 0.36, 0.56, 1.15)
+    gs_score  = pct_score(gs,  0.11, 0.26, 0.43, 0.69, 1.50)
+    score = pts_score * 0.6 + gs_score * 0.4
+
+    if score >= 85: grade, desc = "A",  "Elite offensive D-man — top 10% in the league"
+    elif score >= 70: grade, desc = "B+", "Above average offensively — strong contributor"
+    elif score >= 55: grade, desc = "B",  "Solid offensive production — above median"
+    elif score >= 38: grade, desc = "C+", "Average offensive output for a defenseman"
+    elif score >= 20: grade, desc = "C",  "Below average offensively"
+    else:             grade, desc = "D",  "Minimal offensive contribution"
+
+    return grade, round(score, 1), desc
+
+
+def grade_defensive_defenseman(def_stats):
+    """
+    Grade a defenseman's defensive production on A-F scale.
+    Returns (grade, score_0_100, description).
+    """
+    hits  = def_stats.get("ind_hits_pg",        0)
+    tka   = def_stats.get("ind_takeaways_pg",   0)
+    xga   = def_stats.get("xg_against_per60_5v5", 2.5)
+    pk    = def_stats.get("pk_ice_pct",         0)
+    pim   = def_stats.get("pim_pg",             0)
+
+    # Normalize each metric relative to league D-man ranges
+    score = 0
+    score += 25 * min(tka / 0.50, 1.0)                        # takeaways — elite = 0.50/gp
+    score += 30 * max(0, (3.5 - xga) / (3.5 - 1.8))          # xGA suppression
+    score += 20 * min(pk  / 0.18,  1.0)                       # PK deployment
+    score += 15 * min(hits / 3.0,  1.0)                       # physicality
+    score += 10 * max(0, 1 - pim / 1.2)                       # discipline (low PIM = good)
+
+    if score >= 80: grade, desc = "A",  "Elite defensive D-man"
+    elif score >= 65: grade, desc = "B+", "Above average defensively"
+    elif score >= 50: grade, desc = "B",  "Solid defensive contributor"
+    elif score >= 35: grade, desc = "C+", "Average defensive production"
+    elif score >= 20: grade, desc = "C",  "Below average defensively"
+    else:             grade, desc = "D",  "Minimal defensive contribution"
+
+    return grade, round(score, 1), desc
+
+
 # ── Defensive model config ────────────────────────────────────────────────────
 
 # DEF_FILE already defined above
@@ -1679,42 +1705,29 @@ DEF_CACHE_FILE = "defensive_models.joblib"
 DEF_TARGETS = [
     "ind_hits_pg",
     "ind_takeaways_pg",
-    "xga_per60_zone_adj",          # deployment-adjusted xGA/60
+    "xg_against_per60_5v5",
     "pk_ice_pct",
     "pim_pg",
-    "shots_blocked_by_player_pg",  # article: blocking shots is explicit D responsibility
-    "ind_giveaways_pg",            # article: puck decisions / disrupting offensive flow
 ]
 
 DEF_TARGET_LABELS = {
     "ind_hits_pg":              "Hits / Game",
     "ind_takeaways_pg":         "Takeaways / Game",
-    "xga_per60_zone_adj":         "xGA / 60 — Zone-Start Adjusted",
-    "goals_against_per60":        "GA / 60 — 5v5 (ice-time adjusted)",
-    "shots_blocked_by_player_pg": "Shots Blocked / Game",
-    "ind_giveaways_pg":           "Giveaways / Game",
-    "take_give_ratio":            "Takeaway / Giveaway Ratio",
+    "xg_against_per60_5v5":     "xGA Against / 60 (5v5)",
     "pk_ice_pct":               "PK Ice Time %",
     "pim_pg":               "PIM / Game",
 }
 
 # Lower is better for these targets
-DEF_LOWER_IS_BETTER = {"goals_against_per60", "xga_per60_zone_adj", "pim_pg", "ind_giveaways_pg"}
+DEF_LOWER_IS_BETTER = {"xg_against_per60_5v5", "pim_pg"}
 
 # Defensive score weights (used for pairing)
-# Weights derived from the article's framework:
-#   Analytics (xGA, Corsi) → highest weight
-#   Active puck recovery (takeaways) + coaching trust (PK) → medium
-#   Physical play (blocks, hits) → secondary
-#   Puck decisions (giveaways, PIM) → discipline penalty
 DEF_SCORE_WEIGHTS = {
-    "xga_per60_zone_adj":          0.25,  # zone-adj xGA/60 — quality of chances against
-    "ind_takeaways_pg":            0.18,  # active puck recovery
-    "pk_ice_pct":                  0.15,  # coaching trust in defensive situations
-    "shots_blocked_by_player_pg":  0.13,  # sacrificing body — explicit D responsibility
-    "take_give_ratio":             0.12,  # puck decision balance (higher = more takes than gives)
-    "ind_hits_pg":                 0.09,  # physicality (article: important but not everything)
-    "pim_pg":                      0.08,  # discipline — lower is better
+    "ind_hits_pg":              0.15,
+    "ind_takeaways_pg":         0.20,
+    "xg_against_per60_5v5":    0.30,  # most important
+    "pk_ice_pct":               0.20,
+    "pim_pg":               0.15,
 }
 
 # Pairing slot definitions
@@ -1733,12 +1746,9 @@ DEF_PAIR_COLORS = {
 DEF_BASELINE_FEATURES = {
     "ind_hits_pg":             ["prev_season_hits_pg",     "recent_3yr_mean_hits_pg",     "career_prev_mean_hits_pg"],
     "ind_takeaways_pg":        ["prev_season_takeaways_pg","recent_3yr_mean_takeaways_pg","career_prev_mean_takeaways_pg"],
-    "xga_per60_zone_adj":  ["prev_season_xga_pg",      "recent_3yr_mean_xga_pg",      "career_prev_mean_xga_pg"],
-    "goals_against_per60": ["prev_season_xga_pg",      "recent_3yr_mean_xga_pg",      "career_prev_mean_xga_pg"],
-    "pk_ice_pct":                  ["prev_season_pk_pct",          "recent_3yr_mean_pk_pct",          "career_prev_mean_pk_pct"],
-    "pim_pg":                      ["prev_season_pim_pg",           "recent_3yr_mean_pim_pg",           "career_prev_mean_pim_pg"],
-    "shots_blocked_by_player_pg":  ["prev_season_blocks_pg",        "recent_3yr_mean_blocks_pg",        "career_prev_mean_blocks_pg"],
-    "ind_giveaways_pg":            ["prev_season_giveaways_pg",     "recent_3yr_mean_giveaways_pg",     "career_prev_mean_giveaways_pg"],
+    "xg_against_per60_5v5":  ["prev_season_xga_pg",      "recent_3yr_mean_xga_pg",      "career_prev_mean_xga_pg"],
+    "pk_ice_pct":              ["prev_season_pk_pct",      "recent_3yr_mean_pk_pct",      "career_prev_mean_pk_pct"],
+    "pim_pg":               ["prev_season_pim_pg","recent_3yr_mean_pim_pg","career_prev_mean_pim_pg"],
 }
 
 # ── Player features ────────────────────────────────────────────────────────────
@@ -1753,10 +1763,7 @@ DEF_PLAYER_FEATURES = [
     "take_give_ratio",
     "d_zone_start_pct",
     "faceoff_win_pct",
-    # On-ice defensive impact
-    "xga_per60_zone_adj",      # zone-adjusted xGA/60 — used in defensive score
-    "goals_against_per60",     # raw GA/60 fallback
-    "xg_against_per60_5v5",
+    # On-ice defensive impact (xg_against_per60_5v5 is a target, not a feature)
     "hd_shots_against_per60_5v5",
     "on_ice_corsi_pct",
     "on_ice_fenwick_pct",
@@ -1856,49 +1863,14 @@ def def_engineer_features(df):
     d["pct_of_peak_hits"]      = def_safe_div(d["ind_hits_pg"],      d["career_peak_hits_pg"])
     d["pct_of_peak_takeaways"] = def_safe_div(d["ind_takeaways_pg"], d["career_peak_takeaways_pg"])
 
-    # Goals Against / 60 (5v5) — controls for ice time so high-minute D-men
-    # aren't penalised just for being on the ice more.
-    # Priority: use MoneyPuck's pre-computed per-60 column; fall back to
-    # computing it from raw on-ice goals divided by 5v5 TOI in hours.
-    if "goals_against_per60_5v5" in d.columns:
-        d["goals_against_per60"] = d["goals_against_per60_5v5"]
-    elif "on_ice_against_goals" in d.columns:
-        if "fv5_ice_time" in d.columns:
+    # Goals against per game (cleaner than per-60 — same scale as EDGE/API)
+    if "on_ice_against_goals" in d.columns and "games_played" in d.columns:
+        gp_safe = d["games_played"].replace(0, np.nan)
+        # xGA per 60 5v5 — uses expected goals (more stable than actual)
+        # already in dataset; fallback to computing from raw columns
+        if "xg_against_per60_5v5" not in d.columns:
             fv5_hours = (d["fv5_ice_time"] / 3600).replace(0, np.nan)
-        elif "ice_time" in d.columns:
-            # Approximate: assume ~60% of total TOI is 5v5
-            fv5_hours = (d["ice_time"] * 0.60 / 3600).replace(0, np.nan)
-        else:
-            fv5_hours = None
-        if fv5_hours is not None:
-            d["goals_against_per60"] = d["on_ice_against_goals"] / fv5_hours
-        else:
-            # Last resort: per-game (not ideal but labeled correctly in display)
-            gp_safe = d["games_played"].replace(0, np.nan)
-            d["goals_against_per60"] = d["on_ice_against_goals"] / gp_safe
-
-    # ── Zone-start adjusted xGA/60 (training label + feature) ─────────────────
-    # This is the primary quality-against target the model trains to predict.
-    # Adjusting BEFORE training means the model learns the true relationship
-    # between deployment, shot suppression, and defensive quality — rather than
-    # us bolting on an adjustment after the fact.
-    #
-    # Formula:  adj_xga = xg_against_per60_5v5 * (league_avg_dzone / player_dzone)^0.5
-    # Square-root dampens the correction; clamped to [0.70, 1.40].
-    if "xg_against_per60_5v5" in d.columns and "d_zone_start_pct" in d.columns:
-        league_avg_dzone = d.groupby("season")["d_zone_start_pct"].transform("mean")
-        dzone_ratio = def_safe_div(league_avg_dzone, d["d_zone_start_pct"].replace(0, np.nan), fill=1.0)
-        dzone_ratio = dzone_ratio.clip(0.70, 1.40)
-        d["xga_per60_zone_adj"] = d["xg_against_per60_5v5"] * (dzone_ratio ** 0.5)
-    elif "goals_against_per60" in d.columns and "d_zone_start_pct" in d.columns:
-        league_avg_dzone = d.groupby("season")["d_zone_start_pct"].transform("mean")
-        dzone_ratio = def_safe_div(league_avg_dzone, d["d_zone_start_pct"].replace(0, np.nan), fill=1.0)
-        dzone_ratio = dzone_ratio.clip(0.70, 1.40)
-        d["xga_per60_zone_adj"] = d["goals_against_per60"] * (dzone_ratio ** 0.5)
-    elif "xg_against_per60_5v5" in d.columns:
-        d["xga_per60_zone_adj"] = d["xg_against_per60_5v5"]
-    elif "goals_against_per60" in d.columns:
-        d["xga_per60_zone_adj"] = d["goals_against_per60"]
+            d["xg_against_per60_5v5"] = d["on_ice_against_expected_goals"] / fv5_hours
 
     # Age interactions
     if "age" in d.columns:
@@ -1922,12 +1894,9 @@ def def_engineer_career_history(df):
     for col, name in [
         ("ind_hits_pg",             "hits_pg"),
         ("ind_takeaways_pg",        "takeaways_pg"),
-        # Use zone-adjusted xGA as the historical quality-against signal.
-        ("xga_per60_zone_adj",        "xga_pg"),
-        ("pk_ice_pct",                "pk_pct"),
-        ("ind_penalty_minutes_pg",    "pim_pg"),
-        ("shots_blocked_by_player_pg","blocks_pg"),
-        ("ind_giveaways_pg",          "giveaways_pg"),
+        ("xg_against_per60_5v5", "xga_pg"),
+        ("pk_ice_pct",              "pk_pct"),
+        ("ind_penalty_minutes_pg", "pim_pg"),
     ]:
         d[f"prev_season_{name}"] = g[col].shift(1)
         d[f"recent_3yr_mean_{name}"] = (
@@ -1946,7 +1915,7 @@ def def_engineer_career_history(df):
     # YoY deltas
     d["yoy_hits_delta"]      = g["ind_hits_pg"].diff()
     d["yoy_takeaways_delta"] = g["ind_takeaways_pg"].diff()
-    d["yoy_xga_delta"]       = g["xga_per60_zone_adj"].diff()
+    d["yoy_xga_delta"]       = g["xg_against_per60_5v5"].diff()
 
     return d
 
@@ -1958,7 +1927,7 @@ def def_build_team_context(df):
         .agg(
             team_avg_hits_pg         = ("ind_hits_pg",             "mean"),
             team_avg_takeaways_pg    = ("ind_takeaways_pg",        "mean"),
-            team_avg_xga_per60       = ("xga_per60_zone_adj", "mean"),
+            team_avg_xga_per60       = ("xg_against_per60_5v5", "mean"),
             team_avg_pk_pct          = ("pk_ice_pct",              "mean"),
             team_avg_pim_pg          = ("ind_penalty_minutes_pg",  "mean"),
             team_avg_toi_pg          = ("pk_toi_per_game",         "mean"),
@@ -2200,56 +2169,77 @@ def def_build_all_team_predictions(profile, all_teams, models, has_age,
     return pd.DataFrame(rows)
 
 
-def classify_defenseman_role(profile):
+def classify_defenseman_type(scores):
     """
-    Classify a defenseman as Offensive D / Two-Way D / Defensive D.
-
-    Based on the article framework:
-      Offensive D  — puck-movers, high Corsi, fewer D-zone starts, contribute offensively
-      Defensive D  — physical, shot-blockers, shutdown, high PK time, heavy D-zone starts
-      Two-Way D    — balanced across all dimensions (most versatile)
-
-    Returns (role_label, role_color, role_description).
+    Classify a defenseman into one of three types:
+      Offensive D  — focused on generating offense; exceptional skating and
+                     puck-handling but may leave team vulnerable defensively
+      Defensive D  — focused on stopping the opposition; physical, blocks shots,
+                     clears pucks, but may struggle generating offense
+      Two-Way D    — well-rounded, contributes to both ends; versatile but may
+                     not excel as much as specialized counterparts
     """
-    corsi     = float(profile.get("on_ice_corsi_pct", 0.50) or 0.50)
-    d_zone    = float(profile.get("d_zone_start_pct", 0.40) or 0.40)
-    pk_pct    = float(profile.get("pk_ice_pct", 0.0) or 0.0)
-    hits      = float(profile.get("ind_hits_pg", 0) or 0)
-    blocks    = float(profile.get("shots_blocked_by_player_pg", 0) or 0)
-    takeaways = float(profile.get("ind_takeaways_pg", 0) or 0)
-    giveaways = float(profile.get("ind_giveaways_pg", 0.5) or 0.5)
+    hits   = scores.get("ind_hits_pg", 0)
+    xga    = scores.get("xg_against_per60_5v5", 2.5)
+    pk_pct = scores.get("pk_ice_pct", 0.07)
+    tka    = scores.get("ind_takeaways_pg", 0)
 
-    # Offensive signal: above-average Corsi, fewer D-zone starts
-    off_score = (corsi - 0.50) * 200 + max(0, 0.40 - d_zone) * 150
+    # Offensive D: low physicality, low PK usage, good suppression (reads plays)
+    # Defensive D: high physicality, high PK, high suppression
+    # Two-Way D:   mixed — neither extreme
 
-    # Defensive signal: physicality, shot blocking, PK usage, heavy D-zone deployment
-    def_score_val = (hits * 10) + (blocks * 10) + (pk_pct * 100) + max(0, d_zone - 0.40) * 150
+def classify_defenseman_type(scores):
+    """
+    Classify a defenseman into one of three types by scoring them
+    on both offensive and defensive dimensions independently.
 
-    # Puck decision quality: high takeaway/giveaway ratio tilts toward D
-    tg_ratio = takeaways / max(giveaways, 0.1)
-    def_score_val += max(0, tg_ratio - 1.5) * 5
+    Offensive signals: low hits, low PIM, high takeaways (transition play)
+    Defensive signals: high hits, high PIM, heavy PK usage
 
-    OFF_THRESHOLD = 8
-    DEF_THRESHOLD = 8
+    A player who scores high on BOTH = Two-Way D
+    A player who scores high on defensive only = Defensive D
+    A player who scores low on both physical dimensions = Offensive D
+    """
+    hits   = scores.get("ind_hits_pg",       1.1)
+    pk_pct = scores.get("pk_ice_pct",        0.07)
+    tka    = scores.get("ind_takeaways_pg",  0.31)
+    pim    = scores.get("pim_pg",            0.45)
 
-    if off_score >= OFF_THRESHOLD and def_score_val < DEF_THRESHOLD:
-        return (
-            "Offensive D", "#4a90d9",
-            "Puck-mover with high Corsi and offensive zone deployment. "
-            "Contributes by moving pucks up ice and generating offense."
+    # Score each dimension relative to league averages
+    # Defensive dimension: physicality + PK deployment
+    def_points = 0
+    def_points += 2 if hits   >= 2.0  else (1 if hits   >= 1.5  else 0)
+    def_points += 2 if pk_pct >= 0.12 else (1 if pk_pct >= 0.09  else 0)
+    def_points += 1 if pim    >= 0.6  else 0
+
+    # Offensive dimension: puck skills, transition, reading the game
+    # Low hits = skater not a banger, high takeaways = active in transition
+    off_points = 0
+    off_points += 2 if hits   <= 0.7  else (1 if hits   <= 1.0  else 0)
+    off_points += 2 if tka    >= 0.40 else (1 if tka    >= 0.33  else 0)
+    off_points += 1 if pk_pct <= 0.05 else 0   # rarely deployed on PK = more offensive role
+
+    # Classify based on balance
+    if def_points >= 2 and off_points >= 2:
+        return "Two-Way D", (
+            "Two-way defenceman — well-rounded with contributions at both ends. "
+            "Versatile and reliable in any situation."
         )
-    elif def_score_val >= DEF_THRESHOLD and off_score < OFF_THRESHOLD:
-        return (
-            "Defensive D", "#57a85a",
-            "Shutdown D with physical play, shot blocking, and heavy defensive-zone deployment. "
-            "Trusted on the penalty kill."
+    if def_points >= 3:
+        return "Defensive D", (
+            "Defensive defenceman — physical, blocks shots, clears the zone. "
+            "Strong defensively but may struggle generating offense."
         )
-    else:
-        return (
-            "Two-Way D", "#FFD700",
-            "Balanced across offense and defense. "
-            "Versatile — can contribute in all situations."
+    if off_points >= 3:
+        return "Offensive D", (
+            "Offensive defenceman — exceptional skating and puck-handling, "
+            "creates scoring opportunities but may be vulnerable defensively."
         )
+    # Middle ground — lean toward two-way
+    return "Two-Way D", (
+        "Two-way defenceman — well-rounded with contributions at both ends. "
+        "Versatile and reliable in any situation."
+    )
 
 
 def def_compute_defensive_score(df_preds, season_df=None):
@@ -2259,32 +2249,19 @@ def def_compute_defensive_score(df_preds, season_df=None):
     Normalises each metric against fixed league-wide empirical ranges
     rather than within the prediction set — avoids the collapse-to-45
     issue when all 32-team predictions are similar.
-
-    The quality-against component uses zone-start adjusted xGA/60:
-    the model predicts goals_against_per60, which is then adjusted by
-    d_zone_start_pct so that D-men eating harder minutes aren't penalised
-    for their deployment.
     """
+    # Empirical league-wide ranges for D-men (from 2024 season analysis)
+    # Format: {target: (p5, p95)} — values outside this range are clipped
     LEAGUE_RANGES = {
-        "ind_hits_pg":        (0.0,  3.5),
-        "ind_takeaways_pg":   (0.0,  0.65),
-        "xga_per60_zone_adj": (1.5,  3.5),  # zone-adjusted xGA/60
-        "goals_against_per60":(1.5,  3.5),  # fallback if zone-adj unavailable
-        "pk_ice_pct":                  (0.0,  0.18),
-        "pim_pg":                      (0.0,  1.2),
-        "shots_blocked_by_player_pg":  (0.0,  3.5),
-        "ind_giveaways_pg":            (0.0,  1.5),
-        "take_give_ratio":             (0.5,  4.0),
+        "ind_hits_pg":           (0.0,  3.5),
+        "ind_takeaways_pg":      (0.0,  0.65),
+        "xg_against_per60_5v5": (1.8,  3.5),  # xGA per 60 5v5
+        "pk_ice_pct":            (0.0,  0.18),
+        "pim_pg":                (0.0,  1.2),
     }
 
     result = df_preds.copy()
-
-    # xga_per60_zone_adj is now a direct model prediction — no post-hoc adjustment needed.
-    # Fall back to goals_against_per60 only if the model hasn't been retrained yet.
-    if "xga_per60_zone_adj" not in result.columns and "goals_against_per60" in result.columns:
-        result["xga_per60_zone_adj"] = result["goals_against_per60"]
-
-    score = np.zeros(len(result))
+    score  = np.zeros(len(result))
 
     for target, weight in DEF_SCORE_WEIGHTS.items():
         if target not in result.columns:
@@ -2373,9 +2350,10 @@ def def_fetch_team_roster_d(team_code):
         players = []
         for p in data.get("defensemen", []):
             players.append({
-                "player_id":   int(p["id"]),
-                "player_name": f"{p['firstName']['default']} {p['lastName']['default']}",
-                "position":    "D",
+                "player_id":    int(p["id"]),
+                "player_name":  f"{p['firstName']['default']} {p['lastName']['default']}",
+                "position":     "D",
+                "shoots":       p.get("shootsCatches", ""),  # "L" or "R"
             })
         return players
     except Exception:
@@ -2383,223 +2361,132 @@ def def_fetch_team_roster_d(team_code):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_actual_pairs(team_code):
+def fetch_actual_pairs(team_code, d_pids=None):
     """
-    Fetch actual D-pair combinations using shared TOI.
-
-    Strategy (tries in order, returns on first success):
-      1. NHL stats REST API  — pre-computed on-ice-with data for the season.
-      2. NHL shift chart API — parses raw per-game shift data.
-
-    Returns ([(pid1, pid2, shared_seconds), ...], error_string_or_None).
+    Fetch actual D-pair combinations from NHL shift chart data.
+    d_pids: frozenset of defenseman player IDs to filter shifts.
+    Returns a list of (pid1, pid2, shared_seconds) sorted by shared TOI desc.
     """
-    import datetime
-    from collections import defaultdict
-
-    FINISHED_STATES = {"OFF", "FINAL", "CRIT", "OVER"}  # all states meaning game ended
-
-    def _to_int_pid(v):
-        try:
-            return int(v)
-        except Exception:
-            return None
-
-    def _to_seconds(v):
-        if v is None:
-            return None
-        if isinstance(v, (int, float, np.integer, np.floating)):
-            return int(v)
-        s = str(v).strip()
-        if not s or s == "None":
-            return None
-        if ":" in s:
-            parts = s.split(":")
-            try:
-                if len(parts) == 2:
-                    return int(parts[0]) * 60 + int(parts[1])
-                if len(parts) == 3:
-                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            except Exception:
-                return None
-        try:
-            return int(float(s))
-        except Exception:
-            return None
-
-    # ── Fetch current D-men roster (used by both methods) ─────────────────────
+    # Convert to set for fast lookup (cache receives frozenset)
+    d_pids_set = set(d_pids) if d_pids else None
     try:
-        roster_url  = f"https://api-web.nhle.com/v1/roster/{team_code}/{CURRENT_SEASON}"
-        roster_resp = requests.get(roster_url, timeout=10)
-        roster_resp.raise_for_status()
-        d_pids = {int(p["id"]) for p in roster_resp.json().get("defensemen", [])}
-    except Exception:
-        d_pids = set()
+        import datetime
+        from collections import defaultdict
 
-    # ── Method 1: NHL stats REST API (on-ice-with, pre-computed) ──────────────
-    # Note: api.nhle.com is a separate domain from api-web.nhle.com
-    # and may be unavailable in some network environments.
-    try:
-        import urllib.parse
-        import json as _json
-        sort_param  = _json.dumps([{"property": "timeOnIceWith", "direction": "DESC"}])
-        cayenne_exp = f'seasonId={CURRENT_SEASON} and gameTypeId=2 and teamAbbrevs="{team_code}"'
-        fact_exp    = "gamesPlayedWith>=5"
-        stats_url   = (
-            "https://api.nhle.com/stats/rest/en/skater/oniceWith"
-            f"?isAggregate=true&isGame=false"
-            f"&sort={urllib.parse.quote(sort_param)}"
-            f"&start=0&limit=500"
-            f"&factCayenneExp={urllib.parse.quote(fact_exp)}"
-            f"&cayenneExp={urllib.parse.quote(cayenne_exp)}"
+        # Use the stats rest API for recent games — more reliable than schedule
+        # Get team's recent game log for current season
+        games_url = (
+            f"https://api.nhle.com/stats/rest/en/team/summary"
+            f"?cayenneExp=seasonId=20252026 and teamAbbrevs={team_code}"
+            f"&limit=1"
         )
-        stats_resp = requests.get(stats_url, timeout=15)
-        if stats_resp.ok:
-            stats_data = stats_resp.json().get("data", [])
-            pair_toi   = defaultdict(int)
-            for row in stats_data:
-                pid1 = _to_int_pid(row.get("playerId"))
-                pid2 = _to_int_pid(row.get("withPlayerId"))
-                toi  = row.get("timeOnIceWith", 0)
-                if pid1 is None or pid2 is None or toi <= 0:
-                    continue
-                if d_pids and (pid1 not in d_pids or pid2 not in d_pids):
-                    continue
-                key = tuple(sorted([pid1, pid2]))
-                pair_toi[key] = max(pair_toi[key], int(toi))
-            if pair_toi:
-                pairs = sorted(pair_toi.items(), key=lambda x: x[1], reverse=True)
-                return [(p[0], p[1], toi) for (p, toi) in pairs], None
-    except Exception:
-        pass  # fall through to shift chart method
 
-    # ── Method 2: Raw shift chart parsing ─────────────────────────────────────
-    errors = []
-    try:
-        # Scan back week by week until we have at least 10 finished games
-        TARGET_GAMES  = 10
-        MAX_WEEKS_BACK = 12   # extended to cover playoffs / schedule gaps
-        all_games  = []
-        seen_ids   = set()
-
-        for weeks_back in range(MAX_WEEKS_BACK):
-            date_str = (datetime.date.today() - datetime.timedelta(weeks=weeks_back)).strftime("%Y-%m-%d")
-            url = f"https://api-web.nhle.com/v1/club-schedule/{team_code}/week/{date_str}"
+        # Fall back to schedule endpoint for game IDs
+        finished = []
+        for week_offset in [0, 1, 2, 3, 4, 5]:
+            check_date = (datetime.date.today() - datetime.timedelta(weeks=week_offset)).strftime("%Y-%m-%d")
+            sched_url  = f"https://api-web.nhle.com/v1/club-schedule/{team_code}/week/{check_date}"
             try:
-                resp = requests.get(url, timeout=10)
-                if not resp.ok:
-                    continue
-                for g in resp.json().get("games", []):
-                    gid = g.get("id")
-                    if gid and gid not in seen_ids:
-                        seen_ids.add(gid)
-                        all_games.append(g)
-            except Exception as e:
-                errors.append(f"schedule week {date_str}: {e}")
+                resp = requests.get(sched_url, timeout=10)
+                if resp.ok:
+                    week_games = resp.json().get("games", [])
+                    # Accept any game that is not upcoming
+                    done = [g for g in week_games
+                            if g.get("gameState") not in ("FUT", "PRE", "PREVIEW")
+                            and g.get("gameType", 2) == 2]  # regular season only
+                    finished.extend(done)
+            except Exception:
                 continue
-
-            # Accept any game state that isn't clearly "not yet played"
-            n_finished = sum(
-                1 for g in all_games
-                if str(g.get("gameState", "")).upper() not in ("FUT", "LIVE", "PRE", "CRIT", "")
-                or str(g.get("gameState", "")).upper() in FINISHED_STATES
-            )
-            if n_finished >= TARGET_GAMES:
+            if len(finished) >= 5:
                 break
 
-        # Filter to finished games
-        finished = sorted(
-            [g for g in all_games
-             if str(g.get("gameState", "")).upper() in FINISHED_STATES
-             or str(g.get("gameState", "")).upper() not in ("FUT", "LIVE", "PRE", "")],
-            key=lambda g: g.get("startTimeUTC", ""),
-            reverse=True,
-        )[:TARGET_GAMES]
+        # Deduplicate by id
+        seen = set()
+        unique_finished = []
+        for g in finished:
+            gid = g.get("id")
+            if gid and gid not in seen:
+                seen.add(gid)
+                unique_finished.append(g)
+        finished = sorted(unique_finished, key=lambda g: g.get("gameDate", ""), reverse=True)
 
         if not finished:
-            return [], f"No finished games found in last {MAX_WEEKS_BACK} weeks."
+            return [], "No recent finished games found for this team."
 
-        pair_toi = defaultdict(int)
+        # Build shared TOI matrix from shifts
+        pair_toi = defaultdict(int)  # (pid1, pid2) -> shared seconds
+        errors   = []
         games_processed = 0
 
-        for game in finished:
+        for game in finished[:10]:
             game_id = game.get("id")
             if not game_id:
                 continue
             try:
-                shift_url  = f"https://api-web.nhle.com/v1/shiftcharts/{game_id}"
-                shift_resp = requests.get(shift_url, timeout=10)
+                shift_url = f"https://api.nhle.com/stats/rest/en/shiftcharts?cayenneExp=gameId={game_id}"
+                shift_resp = requests.get(shift_url, timeout=15)
                 shift_resp.raise_for_status()
                 shifts_raw = shift_resp.json().get("data", [])
+                if not shifts_raw:
+                    continue
 
-                # Identify which field holds the team abbreviation
-                # (NHL API has used both "teamAbbrev" and "teamTriCode")
-                sample = next((s for s in shifts_raw if s), {})
-                team_field = None
-                for candidate in ("teamAbbrev", "teamTriCode", "team", "teamCode"):
-                    if candidate in sample:
-                        team_field = candidate
-                        break
+                # Stats API shift fields:
+                # playerId, teamAbbrev, period, startTime, endTime, detailCode
+                # startTime/endTime are MM:SS strings — convert to seconds
 
-                # Filter to this team's D-men. Try teamAbbrev first; if that
-                # yields nothing, fall back to d_pids-only filter.
-                if team_field:
-                    team_d_shifts = [
-                        s for s in shifts_raw
-                        if s.get(team_field) == team_code
-                        and (not d_pids or _to_int_pid(s.get("playerId")) in d_pids)
-                    ]
-                else:
-                    team_d_shifts = []
+                def _to_secs(t):
+                    """Convert MM:SS string or int to seconds."""
+                    if isinstance(t, (int, float)):
+                        return int(t)
+                    try:
+                        parts = str(t).split(":")
+                        return int(parts[0]) * 60 + int(parts[1])
+                    except Exception:
+                        return 0
 
-                # Fallback: if team field filter got nothing, just use d_pids
-                if not team_d_shifts and d_pids:
-                    team_d_shifts = [
-                        s for s in shifts_raw
-                        if _to_int_pid(s.get("playerId")) in d_pids
-                    ]
+                # Filter to team's D-men shifts only (detailCode 0 = regular shift)
+                team_shifts = [
+                    s for s in shifts_raw
+                    if s.get("teamAbbrev") == team_code
+                    and s.get("detailCode") == 0
+                    and (d_pids_set is None or s.get("playerId") in d_pids_set)
+                ]
 
-                if len(team_d_shifts) < 2:
-                    continue  # not enough D-men to form a pair
-
+                # Group shifts by period and find overlapping D pairs
                 by_period = defaultdict(list)
-                for s in team_d_shifts:
-                    period = s.get("period") or s.get("periodNumber")
-                    if period is not None:
-                        by_period[period].append(s)
+                for s in team_shifts:
+                    by_period[s["period"]].append(s)
 
-                for period_shifts in by_period.values():
-                    period_shifts.sort(key=lambda x: _to_seconds(x.get("startTime") or x.get("shiftStart")) or 0)
+                for period, period_shifts in by_period.items():
+                    # Sort by start time in seconds
+                    period_shifts.sort(key=lambda x: _to_secs(x.get("startTime", 0)))
                     n = len(period_shifts)
                     for i in range(n):
                         si      = period_shifts[i]
-                        pid_i   = _to_int_pid(si.get("playerId"))
-                        start_i = _to_seconds(si.get("startTime") or si.get("shiftStart"))
-                        end_i   = _to_seconds(si.get("endTime")   or si.get("shiftEnd"))
-                        if pid_i is None or start_i is None or end_i is None:
-                            continue
+                        pid_i   = si.get("playerId")
+                        start_i = _to_secs(si.get("startTime", 0))
+                        end_i   = _to_secs(si.get("endTime",   0))
                         for j in range(i + 1, n):
-                            sj       = period_shifts[j]
-                            sj_start = _to_seconds(sj.get("startTime") or sj.get("shiftStart"))
-                            if sj_start is None:
-                                continue
-                            if sj_start >= end_i:
+                            sj      = period_shifts[j]
+                            start_j = _to_secs(sj.get("startTime", 0))
+                            if start_j >= end_i:
                                 break
-                            pid_j  = _to_int_pid(sj.get("playerId"))
-                            sj_end = _to_seconds(sj.get("endTime") or sj.get("shiftEnd"))
-                            if pid_j is None or sj_end is None or pid_i == pid_j:
+                            pid_j = sj.get("playerId")
+                            if pid_i == pid_j:
                                 continue
-                            overlap = min(end_i, sj_end) - max(start_i, sj_start)
+                            end_j   = _to_secs(sj.get("endTime", 0))
+                            overlap = min(end_i, end_j) - max(start_i, start_j)
                             if overlap > 0:
-                                pair_toi[tuple(sorted([pid_i, pid_j]))] += overlap
-
+                                key = tuple(sorted([pid_i, pid_j]))
+                                pair_toi[key] += overlap
                 games_processed += 1
             except Exception as e:
                 errors.append(f"game {game_id}: {e}")
                 continue
 
         if not pair_toi:
-            err_detail = "; ".join(errors[:3]) if errors else f"{games_processed} games processed, no overlapping shifts found"
-            return [], f"Shift data unavailable ({err_detail})."
+            err_msg = f"Shift data unavailable ({'; '.join(errors[:3])})." if errors else "No shift overlap data found."
+            return [], err_msg
 
         pairs = sorted(pair_toi.items(), key=lambda x: x[1], reverse=True)
         return [(p[0], p[1], toi) for (p, toi) in pairs], None
@@ -2619,35 +2506,71 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     # 1. Fetch current roster and actual pair combinations
     roster = def_fetch_team_roster_d(team_code)
     if not roster:
-        return None, "Could not fetch roster.", None
+        return [], [], {}, [], [], {"pair_err": "Could not fetch roster.", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
 
-    roster_pids = {p["player_id"]: p["player_name"] for p in roster}
+    roster_pids  = {p["player_id"]: p["player_name"] for p in roster}
+    roster_shoots = {p["player_id"]: p.get("shoots", "") for p in roster}
+    # Get new player's handedness from bios API if not in roster
+    # (they may be from another team)
+    new_player_shoots = roster_shoots.get(player_id, "")
+    if not new_player_shoots:
+        try:
+            bio_url  = (f"https://api.nhle.com/stats/rest/en/skater/bios"
+                        f"?limit=1&cayenneExp=playerId={player_id} and seasonId={CURRENT_SEASON}")
+            bio_resp = requests.get(bio_url, timeout=8)
+            if bio_resp.ok:
+                bio_data = bio_resp.json().get("data", [])
+                if bio_data:
+                    new_player_shoots = bio_data[0].get("shootsCatches", "")
+        except Exception:
+            pass
 
     # Get all team predictions from model
     all_teams = def_get_latest_team_contexts(df, team_ctx)
     team_row  = all_teams[all_teams["player_team"] == team_code]
     if team_row.empty:
-        return None, f"No team context found for {team_code}.", None
+        return [], [], {}, [], [], {"pair_err": f"No team context for {team_code}.", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
     team_row = team_row.iloc[0]
 
     if player_id not in player_profiles:
-        return None, "Player not found in model data.", None
+        return [], [], {}, [], [], {"pair_err": "Player not found in model data.", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
 
     # 2. Get model predictions for every rostered D-man
     player_scores = {}  # pid -> {metric: val, defensive_score: val, player_name: str}
-    missing_model_players = []
+    # Load offensive stats for grading
+    d_off_stats, _ = load_defensive_offensive_stats()
+
+    def _combined_score(pid, def_score, d_type):
+        """
+        Compute a combined player score that incorporates offensive grade
+        for Two-Way D and Offensive D, weighted by type.
+        """
+        _, off_score, _ = grade_offensive_defenseman(d_off_stats.get(pid, {}))
+        if d_type == "Two-Way D":
+            return round(def_score * 0.5 + off_score * 0.5, 1)
+        elif d_type == "Offensive D":
+            return round(def_score * 0.3 + off_score * 0.7, 1)
+        else:  # Defensive D
+            return round(def_score * 0.8 + off_score * 0.2, 1)
+
     for pid, pname in roster_pids.items():
         if pid not in player_profiles:
-            missing_model_players.append({"player_id": pid, "player_name": pname})
             continue
         prof, _ = player_profiles[pid]
         preds   = def_predict_for_team(prof, team_row, fit_models, has_age,
                                         feature_names=feature_names)
         score_df = def_compute_defensive_score(pd.DataFrame([preds]))
+        # Classify using career profile (actual historical stats), not team-adjusted predictions
+        d_type, d_desc = classify_defenseman_type(dict(prof))
+        def_score = round(score_df["defensive_score"].iloc[0], 1)
         player_scores[pid] = {
             **preds,
-            "defensive_score": round(score_df["defensive_score"].iloc[0], 1),
+            "defensive_score": def_score,
+            "combined_score":  _combined_score(pid, def_score, d_type),
             "player_name":     pname,
+            "d_type":          d_type,
+            "d_desc":          d_desc,
+            "shoots":          roster_shoots.get(pid, ""),
         }
 
     # Also score the searched player
@@ -2655,148 +2578,166 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     search_preds = def_predict_for_team(search_profile, team_row, fit_models, has_age,
                                          feature_names=feature_names)
     search_score_df = def_compute_defensive_score(pd.DataFrame([search_preds]))
+    s_type, s_desc = classify_defenseman_type(dict(search_profile))
+    s_def_score = round(search_score_df["defensive_score"].iloc[0], 1)
     player_scores[player_id] = {
         **search_preds,
-        "defensive_score": round(search_score_df["defensive_score"].iloc[0], 1),
-        "player_name":     search_profile.get("player_name", "Selected Player"),
+        "defensive_score":    s_def_score,
+        "combined_score":     _combined_score(player_id, s_def_score, s_type),
+        "player_name":        search_profile.get("player_name", "Selected Player"),
         "is_searched_player": True,
+        "d_type":             s_type,
+        "d_desc":             s_desc,
+        "shoots":             new_player_shoots,
     }
 
-    # 3. Fetch actual pairs from shift data
-    actual_pairs, pair_err = fetch_actual_pairs(team_code)
+    # 3. Fetch actual pairs from shift data — pass D-men pids to filter shifts
+    d_pids = set(roster_pids.keys()) | {player_id}
+    actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids))
 
-    # 4. Build current pair view (without searched player)
-    current_pairs = []
-    assigned      = set()
+    # 4. Build baseline pairs from shift data (without new player)
+    #    Then cascade the new player in, rippling displaced players down.
 
+    SLOT_NAMES  = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]
+    MAX_ACTIVE  = 6   # 3 pairs of 2
+
+    # Start with shift-derived pairs (excluding the new player)
+    baseline_pairs = []
+    assigned = set()
     if actual_pairs:
-        for (pid1, pid2, shared_toi) in actual_pairs:
-            if pid1 not in roster_pids or pid2 not in roster_pids:
+        for pid1, pid2, toi in actual_pairs:
+            if pid1 not in player_scores or pid2 not in player_scores:
                 continue
             if pid1 in assigned or pid2 in assigned:
                 continue
             if pid1 == player_id or pid2 == player_id:
-                continue  # exclude searched player from current pairs
-            if pid1 not in player_scores or pid2 not in player_scores:
                 continue
-            current_pairs.append({
-                "pid1":      pid1,
-                "pid2":      pid2,
-                "name1":     player_scores[pid1]["player_name"],
-                "name2":     player_scores[pid2]["player_name"],
-                "score1":    player_scores[pid1]["defensive_score"],
-                "score2":    player_scores[pid2]["defensive_score"],
-                "pair_score": round((player_scores[pid1]["defensive_score"] +
-                                     player_scores[pid2]["defensive_score"]) / 2, 1),
-                "shared_toi": shared_toi,
-                "from_shifts": True,
+            baseline_pairs.append([pid1, pid2])
+            assigned.update([pid1, pid2])
+
+    # Any rostered D-man not in shift pairs — add as unassigned pool
+    unassigned_pool = [
+        pid for pid in player_scores
+        if pid not in assigned and pid != player_id and pid in roster_pids
+    ]
+    # Fill remaining pair slots with unassigned players (sorted by score)
+    unassigned_pool.sort(key=lambda p: player_scores[p]["combined_score"], reverse=True)
+    while len(baseline_pairs) < MAX_ACTIVE // 2 and len(unassigned_pool) >= 2:
+        baseline_pairs.append([unassigned_pool.pop(0), unassigned_pool.pop(0)])
+    remaining_solo = unassigned_pool  # odd man out
+
+    # ── Cascade insertion ──────────────────────────────────────────────────────
+    # The new player "tries out" for each pair slot from top to bottom.
+    # If they outscore the weaker partner in a pair, they take that spot.
+    # The displaced player then cascades down to try the next pair, etc.
+
+    cascade_log  = []   # track each move: (player, action, slot)
+    final_pairs  = [list(p) for p in baseline_pairs]  # mutable copy
+    to_place     = player_id   # start: new player needs a slot
+    scratched    = []
+
+    MAX_ITER = len(final_pairs) + 2
+    for iteration in range(MAX_ITER):
+        placed = False
+        new_s      = player_scores[to_place]["combined_score"]
+        new_shoots = player_scores[to_place].get("shoots", "")
+
+        for i, pair in enumerate(final_pairs):
+            p1, p2   = pair
+            s1       = player_scores[p1]["combined_score"]
+            s2       = player_scores[p2]["combined_score"]
+            weaker   = p1 if s1 <= s2 else p2
+            stronger = p2 if s1 <= s2 else p1
+            weaker_s = min(s1, s2)
+
+            # Handedness bonus: if new player is opposite-handed to stronger partner,
+            # they get a +3 compatibility boost (not enough to override score significantly
+            # but enough to prefer a matched pair over an equally-scored unmatched one)
+            stronger_shoots = player_scores[stronger].get("shoots", "")
+            hand_bonus = 3.0 if (new_shoots and stronger_shoots and
+                                  new_shoots != stronger_shoots) else 0.0
+
+            if (new_s + hand_bonus) > weaker_s:
+                # New player displaces the weaker
+                slot = SLOT_NAMES[i] if i < len(SLOT_NAMES) else f"Pair {i+1}"
+                cascade_log.append({
+                    "player":    player_scores[to_place]["player_name"],
+                    "action":    "moved in",
+                    "slot":      slot,
+                    "displaced": player_scores[weaker]["player_name"],
+                })
+                # Replace weaker in pair
+                pair[pair.index(weaker)] = to_place
+                to_place = weaker  # displaced player now needs a slot
+                placed   = True
+                break
+
+        if not placed:
+            # Nobody displaced — to_place goes to scratch
+            cascade_log.append({
+                "player":    player_scores[to_place]["player_name"],
+                "action":    "scratched",
+                "slot":      "—",
+                "displaced": "—",
             })
-            assigned.add(pid1)
-            assigned.add(pid2)
+            scratched.append(to_place)
+            break
 
-    # Any D-man not found in shift data — add as unassigned
-    unassigned = [pid for pid in player_scores
-                  if pid not in assigned and pid != player_id
-                  and pid in roster_pids]
+    # ── Build final depth pairs ────────────────────────────────────────────────
+    depth_pairs = []
+    for i, (p1, p2) in enumerate(final_pairs):
+        slot     = SLOT_NAMES[i] if i < len(SLOT_NAMES) else f"Pair {i+1}"
+        shoots1  = player_scores[p1].get("shoots", "")
+        shoots2  = player_scores[p2].get("shoots", "")
+        hand_ok  = bool(shoots1 and shoots2 and shoots1 != shoots2)
+        depth_pairs.append({
+            "pid1":        p1,
+            "pid2":        p2,
+            "name1":       player_scores[p1]["player_name"],
+            "name2":       player_scores[p2]["player_name"],
+            "score1":      player_scores[p1]["combined_score"],
+            "score2":      player_scores[p2]["combined_score"],
+            "shoots1":     shoots1,
+            "shoots2":     shoots2,
+            "hand_match":  hand_ok,
+            "pair_score":  round((player_scores[p1]["combined_score"] +
+                                  player_scores[p2]["combined_score"]) / 2, 1),
+            "slot":        slot,
+            "slot_color":  DEF_PAIR_COLORS.get(" ".join(slot.split()[:2]), "#888888"),
+            "from_shifts": any(
+                (p1 in (ap[0], ap[1]) and p2 in (ap[0], ap[1]))
+                for ap in actual_pairs
+            ) if actual_pairs else False,
+        })
 
-    # If real pair data isn't available, fall back to MoneyPuck model-ranked pairs.
-    # These are clearly labelled so the user knows they're estimated, not actual.
-    if not current_pairs:
-        scored_roster = sorted(
-            [(pid, info) for pid, info in player_scores.items()
-             if pid != player_id and pid in roster_pids],
-            key=lambda x: x[1]["defensive_score"],
-            reverse=True,
-        )
-        for k in range(0, len(scored_roster) - 1, 2):
-            pid1, info1 = scored_roster[k]
-            pid2, info2 = scored_roster[k + 1]
-            current_pairs.append({
-                "pid1":       pid1,  "pid2":       pid2,
-                "name1":      info1["player_name"], "name2": info2["player_name"],
-                "score1":     info1["defensive_score"],
-                "score2":     info2["defensive_score"],
-                "pair_score": round((info1["defensive_score"] + info2["defensive_score"]) / 2, 1),
-                "shared_toi": None,
-                "from_shifts": False,  # clearly marks as estimated
-            })
-        unassigned = []
+    # Keep only the top 3 pairs by score for downstream UI/API consumers.
+    depth_pairs = sorted(depth_pairs, key=lambda p: p["pair_score"], reverse=True)[:3]
+    for i, pair in enumerate(depth_pairs):
+        slot = SLOT_NAMES[i] if i < len(SLOT_NAMES) else f"Pair {i+1}"
+        pair["slot"] = slot
+        pair["slot_color"] = DEF_PAIR_COLORS.get(" ".join(slot.split()[:2]), "#888888")
 
-    # 5b. Sort current pairs by pair_score (best pair = 1st pair)
-    current_pairs.sort(key=lambda x: x["pair_score"], reverse=True)
-    for i, pair in enumerate(current_pairs):
-        slot_num = i + 1
-        pair["slot"] = f"{slot_num}{'st' if slot_num==1 else 'nd' if slot_num==2 else 'rd' if slot_num==3 else 'th'} Pair"
-        pair["slot_color"] = DEF_PAIR_COLORS.get(pair["slot"].split()[0] + " Pair",
-                             list(DEF_PAIR_COLORS.values())[-1])
-
-    # 6. Find best partner for searched player using defensive score + Corsi style
-    searched_score  = player_scores[player_id]["defensive_score"]
-    searched_corsi  = float(player_scores[player_id].get("on_ice_corsi_pct", 0.50) or 0.50)
-    best_partner_pid  = None
+    # ── Find partner of new player ─────────────────────────────────────────────
     best_partner_name = "—"
     best_partner_slot = "—"
-    pushed_out_name   = "—"
+    searched_score    = player_scores[player_id]["combined_score"]
+    for pair in depth_pairs:
+        if pair["pid1"] == player_id:
+            best_partner_name = pair["name2"]
+            best_partner_slot = pair["slot"]
+        elif pair["pid2"] == player_id:
+            best_partner_name = pair["name1"]
+            best_partner_slot = pair["slot"]
 
-    def _pair_compatibility(pair, searched_score, searched_corsi):
-        """
-        Score how well the searched player fits into this pair.
-        Uses two signals from MoneyPuck data:
-          1. Defensive score proximity — searched player should slot near the pair average
-          2. Corsi style complementarity — a high-Corsi D pairs well with a lower-Corsi
-             defensive D, and vice versa (complementary styles create balanced pairings)
-        Returns a combined score (higher = better fit).
-        """
-        score_delta = abs(searched_score - pair["pair_score"])
-        score_fit   = 1.0 / (1.0 + score_delta / 10.0)   # normalised 0-1
+    # Players with no model data
+    unmodeled = [pid for pid in roster_pids if pid not in player_scores]
 
-        # Get Corsi for both players in the pair
-        c1 = float(player_scores[pair["pid1"]].get("on_ice_corsi_pct", 0.50) or 0.50)
-        c2 = float(player_scores[pair["pid2"]].get("on_ice_corsi_pct", 0.50) or 0.50)
-        partner_corsi = (c1 + c2) / 2.0
-        # Ideal complement: searched Corsi + partner average ≈ 0.50 each, or complementary spread
-        corsi_complement = 1.0 - abs(searched_corsi - (1.0 - partner_corsi))
-        corsi_complement = max(corsi_complement, 0.0)
-
-        # 65% defensive score fit, 35% Corsi style compatibility
-        return score_fit * 0.65 + corsi_complement * 0.35
-
-    if current_pairs:
-        best_compat = -1.0
-        for pair in current_pairs:
-            s1, s2 = pair["score1"], pair["score2"]
-            weaker_pid    = pair["pid1"] if s1 <= s2 else pair["pid2"]
-            weaker_name   = pair["name1"] if s1 <= s2 else pair["name2"]
-            stronger_pid  = pair["pid2"] if s1 <= s2 else pair["pid1"]
-            stronger_name = pair["name2"] if s1 <= s2 else pair["name1"]
-            compat = _pair_compatibility(pair, searched_score, searched_corsi)
-            if compat > best_compat:
-                best_compat       = compat
-                best_partner_pid  = stronger_pid
-                best_partner_name = stronger_name
-                best_partner_slot = pair["slot"]
-                pushed_out_name   = weaker_name
-    elif unassigned:
-        # No shift data — use defensive score + Corsi complement on unassigned D-men
-        def _unassigned_compat(pid):
-            other_score  = player_scores[pid]["defensive_score"]
-            other_corsi  = float(player_scores[pid].get("on_ice_corsi_pct", 0.50) or 0.50)
-            score_fit    = 1.0 / (1.0 + abs(searched_score - other_score) / 10.0)
-            corsi_comp   = 1.0 - abs(searched_corsi - (1.0 - other_corsi))
-            return score_fit * 0.65 + max(corsi_comp, 0.0) * 0.35
-
-        best_partner_pid  = max(unassigned, key=_unassigned_compat)
-        best_partner_name = player_scores[best_partner_pid]["player_name"]
-        best_partner_slot = "Projected"
-
-    return current_pairs, unassigned, player_scores, {
-        "partner_name":       best_partner_name,
-        "partner_slot":       best_partner_slot,
-        "pushed_out_name":    pushed_out_name,
-        "searched_score":     searched_score,
-        "pair_err":           pair_err,
-        "missing_model_players": missing_model_players,
-        "best_partner_pid":   best_partner_pid,
+    return depth_pairs, scratched, player_scores, cascade_log, unmodeled, {
+        "partner_name":    best_partner_name,
+        "partner_slot":    best_partner_slot,
+        "searched_score":  searched_score,
+        "pair_err":        pair_err,
+        "actual_pairs":    actual_pairs,
     }
 
 
@@ -2815,9 +2756,9 @@ def def_build_pairing_insertion(player_id, team_code, df, team_ctx,
 
 def def_make_bar_chart(results, player_name, actual_team, title):
     metric_cols   = ["ind_hits_pg", "ind_takeaways_pg",
-                     "xga_per60_zone_adj", "pk_ice_pct", "defensive_score"]
+                     "xg_against_per60_5v5", "pk_ice_pct", "defensive_score"]
     metric_labels = ["Hits / Game", "Takeaways / Game",
-                     "xGA/60 (Zone Adj)", "PK Ice %", "Defensive Score"]
+                     "Goals Against / 60", "PK Ice %", "Defensive Score"]
 
     fig, axes = plt.subplots(1, 5, figsize=(28, 8))
     fig.patch.set_facecolor("#0e1117")
@@ -2849,14 +2790,14 @@ def def_make_bar_chart(results, player_name, actual_team, title):
 def def_show_results_table(results, actual_team):
     display = results[[
         "player_team", "ind_hits_pg", "ind_takeaways_pg",
-        "xga_per60_zone_adj", "pk_ice_pct", "pim_pg",
+        "xg_against_per60_5v5", "pk_ice_pct", "pim_pg",
         "defensive_score", "is_actual"
     ]].copy()
     display.columns = [
-        "Team", "Hits/GP", "TK/GP", "xGA/60 (adj)",
+        "Team", "Hits/GP", "TK/GP", "xGA/60",
         "PK%", "PEN/GP", "Def Score", "Actual Team"
     ]
-    for col in ["Hits/GP", "TK/GP", "xGA/60 (adj)", "PEN/GP", "Def Score"]:
+    for col in ["Hits/GP", "TK/GP", "xGA/60", "PEN/GP", "Def Score"]:
         display[col] = display[col].round(3)
     display["PK%"] = (display["PK%"] * 100).round(1)
     st.dataframe(
@@ -2940,7 +2881,7 @@ def age_profile(profile, years_ahead, is_defenseman=False):
     # Apply multiplier to skill rate features
     skill_cols = (
         ["ind_hits_per60", "ind_takeaways_per60", "ind_giveaways_per60",
-         "shots_blocked_by_player_per60", "xg_against_per60_5v5",
+         "shots_blocked_by_player_per60",
          "hd_shots_against_per60_5v5", "on_ice_corsi_pct"]
         if is_defenseman else
         ["finishing_skill", "finishing_skill_adj", "ind_shot_attempts_per60",
@@ -3070,7 +3011,7 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
                 "confidence":     conf,
                 "hits_pg":        round(max(preds.get("ind_hits_pg", 0), 0), 2),
                 "takeaways_pg":   round(max(preds.get("ind_takeaways_pg", 0), 0), 3),
-                "goals_against_pg": round(max(preds.get("xga_per60_zone_adj") or preds.get("goals_against_per60", 0), 0), 3),
+                "goals_against_pg": round(max(preds.get("xg_against_per60_5v5", 0), 0), 3),
                 "pk_pct":         round(max(preds.get("pk_ice_pct", 0), 0), 3),
                 "pim_pg":         round(max(preds.get("pim_pg", 0), 0), 3),
                 "def_score":      None,
@@ -3078,7 +3019,7 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
             # Compute defensive score for the year
             from_preds = {"ind_hits_pg": row["hits_pg"],
                           "ind_takeaways_pg": row["takeaways_pg"],
-                          "xga_per60_zone_adj": row["goals_against_pg"],
+                          "xg_against_per60_5v5": row["goals_against_pg"],
                           "pk_ice_pct": row["pk_pct"],
                           "pim_pg": row["pim_pg"]}
             tmp = pd.DataFrame([from_preds])
@@ -3125,251 +3066,52 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
 
 def get_cba_limits(current_age, actual_team, signing_team):
     """
-    Return CBA hard limits for contract length.
+    Return CBA contract length limits under the current CBA.
       - Same team (re-signing):   max 7 years
       - New team (UFA/trade):     max 6 years
       - Age 35+ at signing:       flags cap recapture risk (35+ rule)
-    Note: 'recommended' here is an age-based floor used before projections are
-    available. Call recommend_contract_length() for the performance-aware value.
+      - Age 35+ by contract end:  flags that cap hit counts even if retired
+    Returns dict with limits and flags.
     """
     is_same_team  = actual_team == signing_team
     max_years     = 7 if is_same_team else 6
     is_35_signing = current_age >= 35
-    age_at_expiry = current_age + max_years
-    hits_35_rule  = (current_age + 1) >= 35
 
-    # Hard age cap — absolute ceiling regardless of projections
+    # Age when contract ends (year 1 = next season)
+    age_at_expiry = current_age + max_years
+
+    # Recommended max based purely on age curve (before CBA cap)
     if current_age >= 35:
-        age_cap = 1
+        recommended = 1
     elif current_age >= 33:
-        age_cap = 2
+        recommended = 2
     elif current_age >= 31:
-        age_cap = 3
+        recommended = 3
+    elif current_age >= 28:
+        recommended = 4
     else:
-        age_cap = max_years
+        recommended = max_years  # young enough to fill the contract
+
+    # Never recommend more than CBA allows
+    recommended = min(recommended, max_years)
+
+    # 35+ rule: if player will be 35+ during any year of the contract,
+    # cap hit counts against the team even if player retires
+    hits_35_rule = (current_age + 1) >= 35  # will be 35 in year 1
 
     return {
         "max_years":       max_years,
-        "age_cap":         min(age_cap, max_years),
-        "recommended":     min(age_cap, max_years),  # overridden by recommend_contract_length()
         "is_same_team":    is_same_team,
+        "recommended":     recommended,
         "is_35_signing":   is_35_signing,
         "hits_35_rule":    hits_35_rule,
         "age_at_expiry":   age_at_expiry,
     }
 
 
-def get_roster_cutline(team_code, is_d, df, team_ctx, fit_models, player_profiles, has_age,
-                       def_df=None, def_team_ctx=None, def_fit_models=None,
-                       def_player_profiles=None, def_has_age=False, def_feature_names=None):
-    """
-    Return the model score of the last player who would dress for team_code:
-      - Forwards:   points_pg of the 12th-ranked forward  (4th-line threshold)
-      - Defensemen: defensive_score of the 6th-ranked D-man (3rd-pair threshold)
-
-    A contract year where the signed player projects below this score means they
-    would no longer hold a roster spot on this team.
-
-    Returns (cutline_score, cutline_label) or (None, None) on failure.
-    """
-    ROSTER_SPOTS = 6 if is_d else 12  # last spot that dresses
-
-    if is_d:
-        if not def_fit_models or not def_player_profiles:
-            return None, None
-        try:
-            roster = def_fetch_team_roster_d(team_code)
-            if not roster:
-                return None, None
-
-            all_teams = def_get_latest_team_contexts(def_df, def_team_ctx)
-            team_row  = all_teams[all_teams["player_team"] == team_code]
-            if team_row.empty:
-                return None, None
-            team_row = team_row.iloc[0]
-
-            scores = []
-            for p in roster:
-                pid = p["player_id"]
-                if pid not in def_player_profiles:
-                    continue
-                prof, _ = def_player_profiles[pid]
-                preds   = def_predict_for_team(prof, team_row, def_fit_models,
-                                               def_has_age, feature_names=def_feature_names)
-                score_df = def_compute_defensive_score(pd.DataFrame([preds]))
-                scores.append(round(score_df["defensive_score"].iloc[0], 1))
-
-            if len(scores) < ROSTER_SPOTS:
-                return None, None
-
-            scores.sort(reverse=True)
-            cutline = scores[ROSTER_SPOTS - 1]  # score of the last D-man who dresses
-            return cutline, "3rd-pair threshold (6th D-man)"
-        except Exception:
-            return None, None
-
-    else:  # forwards
-        try:
-            roster_df, err = fetch_active_team_roster(team_code)
-            if err or roster_df is None:
-                return None, None
-
-            latest_ctx  = get_latest_team_contexts(df, team_ctx)
-            league_env  = get_latest_league_env(df)
-
-            # Use center context as the forward baseline (most common position)
-            team_row = latest_ctx[
-                (latest_ctx["player_team"] == team_code) &
-                (latest_ctx["position"] == "C")
-            ]
-            if team_row.empty:
-                return None, None
-            team_row = team_row.iloc[0]
-
-            fwd_positions = {"C", "L", "R"}
-            scores = []
-            for _, rp in roster_df.iterrows():
-                if rp.get("position") not in fwd_positions:
-                    continue
-                pid = int(rp["player_id"])
-                if pid not in player_profiles:
-                    continue
-                prof, _ = player_profiles[pid]
-                row = prof.copy()
-                for col in TEAM_FEATURES:
-                    if col in team_row.index:
-                        row[col] = team_row[col]
-                for k, v in league_env.items():
-                    row[k] = v
-                X        = _make_X_from_profile(row, has_age)
-                baseline = compute_target_baseline(pd.DataFrame([row]), "points_per_game").values[0]
-                raw      = fit_models["points_per_game"]["global"].predict(X)[0]
-                scores.append(float(np.clip(baseline + raw, 0, None)))
-
-            if len(scores) < ROSTER_SPOTS:
-                return None, None
-
-            scores.sort(reverse=True)
-            cutline = scores[ROSTER_SPOTS - 1]  # score of the last forward who dresses
-            return cutline, "4th-line threshold (12th forward)"
-        except Exception:
-            return None, None
-
-
-def recommend_contract_length(rows, is_d, cba_max, current_age, roster_cutline=None, cutline_label=None):
-    """
-    Recommend contract length from actual projected performance values.
-
-    Logic:
-      1. Find the last year the player projects at >= 80% of their year-1 value
-         (the 'value retention' cutoff).
-      2. Detect cliff years — any year where the single-year drop exceeds
-         10% (D) or 12% (F). Cap the recommendation before the cliff.
-      3. If the player is ascending (year-N > year-1), allow up to CBA max.
-      4. Hard-cap by age: 35+ → 1 yr, 33-34 → 2 yrs, 31-32 → 3 yrs.
-         This overrides the performance signal for extreme ages.
-
-    Returns (recommended_years, explanation_string).
-    """
-    if not rows:
-        return min(2, cba_max), "No projection data — defaulting to conservative estimate."
-
-    score_key = "def_score" if is_d else "points_pg"
-    y1_val    = rows[0].get(score_key, 0)
-
-    if y1_val <= 0:
-        return 1, "Year 1 projected value is zero — cannot assess contract length."
-
-    # ── Step 1: value-retention cutoff (last year >= 80% of year-1) ──────────
-    RETENTION_FLOOR = 0.80
-    retention_cutoff = 1
-    for row in rows:
-        val = row.get(score_key, 0)
-        if (val / y1_val) >= RETENTION_FLOOR:
-            retention_cutoff = row["year"]
-        # Don't break early — a plateau after a dip still counts
-
-    # ── Step 2: cliff detection ───────────────────────────────────────────────
-    MAX_YOY_DROP = 0.10 if is_d else 0.12
-    cliff_year = cba_max  # assume no cliff unless found
-    for i in range(1, len(rows)):
-        prev_val = rows[i - 1].get(score_key, 0)
-        curr_val = rows[i].get(score_key, 0)
-        if prev_val > 0 and (prev_val - curr_val) / prev_val > MAX_YOY_DROP:
-            cliff_year = rows[i - 1]["year"]  # recommend stopping before the cliff
-            break
-
-    # ── Step 3: ascending player gets full runway ─────────────────────────────
-    last_val = rows[-1].get(score_key, 0)
-    if last_val >= y1_val:
-        perf_rec = cba_max
-        reason   = "ascending trajectory — production projected to improve or hold steady"
-    else:
-        perf_rec = min(retention_cutoff, cliff_year)
-        decline_pct = (y1_val - last_val) / y1_val * 100
-        reason = (
-            f"production projected to decline ~{decline_pct:.0f}% over {cba_max} years; "
-            f"value retention holds through year {retention_cutoff}"
-            + (f", cliff detected at year {cliff_year}" if cliff_year < cba_max else "")
-        )
-
-    # ── Step 4: hard age cap ──────────────────────────────────────────────────
-    if current_age >= 35:
-        age_hard_cap, age_note = 1, "age 35+ hard cap"
-    elif current_age >= 33:
-        age_hard_cap, age_note = 2, "age 33-34 hard cap"
-    elif current_age >= 31:
-        age_hard_cap, age_note = 3, "age 31-32 hard cap"
-    else:
-        age_hard_cap, age_note = cba_max, None
-
-    recommended = min(perf_rec, age_hard_cap, cba_max)
-    recommended = max(recommended, 1)  # always at least 1
-
-    # ── Step 5: roster cutline ───────────────────────────────────────────────
-    # If the player would fall below the team's 4th-line/3rd-pair threshold,
-    # the contract should expire before that year — they won't hold a spot.
-    cutline_hit_year = None
-    if roster_cutline is not None:
-        for row in rows:
-            val = row.get(score_key, 0)
-            if val < roster_cutline:
-                cutline_hit_year = row["year"]
-                break
-
-    if cutline_hit_year is not None:
-        cutline_rec = max(cutline_hit_year - 1, 1)
-        lbl = cutline_label or ("3rd-pair" if is_d else "4th-line")
-        if cutline_rec < recommended:
-            recommended = cutline_rec
-            if age_hard_cap < cutline_rec:
-                explanation = (
-                    f"Recommended {recommended} yr(s) — {age_note} overrides; "
-                    f"player also projects below {lbl} threshold in year {cutline_hit_year}."
-                )
-            else:
-                explanation = (
-                    f"Recommended {recommended} yr(s) — player projected below {lbl} threshold "
-                    f"starting year {cutline_hit_year}, so contract should not extend beyond year {cutline_rec}."
-                )
-        else:
-            # Cutline not a binding constraint — mention it passes cleanly
-            extra = f" Player stays above {lbl} threshold for the full term."
-            if age_hard_cap < perf_rec:
-                explanation = f"Recommended {recommended} yr(s) — {age_note} overrides projections ({reason}).{extra}"
-            else:
-                explanation = f"Recommended {recommended} yr(s) — {reason}.{extra}"
-    elif age_hard_cap < perf_rec:
-        explanation = f"Recommended {recommended} yr(s) — {age_note} overrides projections ({reason})."
-    else:
-        explanation = f"Recommended {recommended} yr(s) — {reason}."
-
-    return recommended, explanation
-
-
 def contract_risk_rating(rows, is_d):
     """
-    Assess contract risk based on predicted performance trajectory.
+    Assess contract risk based on age trajectory.
     Returns (rating_label, rating_color, explanation).
     """
     if not rows:
@@ -3379,30 +3121,25 @@ def contract_risk_rating(rows, is_d):
     last  = rows[-1]
     n     = len(rows)
 
-    score_key   = "def_score" if is_d else "points_pg"
-    y1_val      = year1.get(score_key, 50 if is_d else 0)
-    yn_val      = last.get(score_key,  50 if is_d else 0)
-    age_yr1     = year1["age"]
-    decline_pct = (y1_val - yn_val) / max(y1_val, 0.01)
+    if is_d:
+        score_key = "def_score"
+        y1_val    = year1.get(score_key, 50)
+        yn_val    = last.get(score_key, 50)
+    else:
+        score_key = "points_pg"
+        y1_val    = year1.get(score_key, 0)
+        yn_val    = last.get(score_key, 0)
 
-    # Check for a single large cliff year in the middle
-    max_yoy_drop = 0.0
-    for i in range(1, len(rows)):
-        prev = rows[i - 1].get(score_key, 0)
-        curr = rows[i].get(score_key, 0)
-        if prev > 0:
-            max_yoy_drop = max(max_yoy_drop, (prev - curr) / prev)
+    decline_pct = (y1_val - yn_val) / max(y1_val, 0.01)
+    age_yr1     = year1["age"]
 
     if age_yr1 >= 35:
-        return "Very High Risk", "#c8102e", f"Age {age_yr1:.0f} at signing — steep decline modeled. 35+ rule applies."
-    elif decline_pct > 0.25 or max_yoy_drop > 0.15:
-        return "High Risk", "#e8622a", (
-            f"Age {age_yr1:.0f} — model projects {decline_pct*100:.0f}% total decline over {n} years"
-            + (f" with a single-year drop of {max_yoy_drop*100:.0f}%" if max_yoy_drop > 0.15 else "") + "."
-        )
-    elif decline_pct > 0.12 or (age_yr1 >= 30 and decline_pct > 0.06):
-        return "Moderate Risk", "#FFD700", f"Age {age_yr1:.0f} — model projects {decline_pct*100:.0f}% decline; manageable with right length."
-    elif decline_pct <= 0:
-        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — ascending player, production projected to improve."
+        return "Very High Risk", "#c8102e", f"Age {age_yr1:.0f} at signing — steep decline likely. 35+ rule applies."
+    elif age_yr1 >= 32 and decline_pct > 0.20:
+        return "High Risk", "#e8622a", f"Age {age_yr1:.0f} with projected {decline_pct*100:.0f}% decline over {n} years."
+    elif age_yr1 >= 30 and decline_pct > 0.10:
+        return "Moderate Risk", "#FFD700", f"Age {age_yr1:.0f} — some decline expected but manageable."
+    elif decline_pct < 0:
+        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — ascending player, production expected to improve."
     else:
-        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — stable production projected through contract."
+        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — stable production expected through contract."

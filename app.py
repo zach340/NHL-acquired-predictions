@@ -10,23 +10,6 @@ Run with:  python -m streamlit run app.py
 import streamlit as st
 from model_utils import *
 
-# Fallback in case model_utils is an older version without classify_defenseman_role
-if "classify_defenseman_role" not in dir():
-    def classify_defenseman_role(profile):
-        corsi  = float(profile.get("on_ice_corsi_pct", 0.50) or 0.50)
-        d_zone = float(profile.get("d_zone_start_pct", 0.40) or 0.40)
-        hits   = float(profile.get("ind_hits_pg", 0) or 0)
-        pk_pct = float(profile.get("pk_ice_pct", 0) or 0)
-        blocks = float(profile.get("shots_blocked_by_player_pg", 0) or 0)
-        off_score = (corsi - 0.50) * 200 + max(0, 0.40 - d_zone) * 150
-        def_score_val = (hits * 10) + (blocks * 10) + (pk_pct * 100) + max(0, d_zone - 0.40) * 150
-        if off_score >= 8 and def_score_val < 8:
-            return "Offensive D", "#4a90d9", "Puck-mover with high Corsi and offensive zone deployment."
-        elif def_score_val >= 8 and off_score < 8:
-            return "Defensive D", "#57a85a", "Shutdown D with physical play, shot blocking, and heavy D-zone deployment."
-        else:
-            return "Two-Way D", "#FFD700", "Balanced across offense and defense — versatile in all situations."
-
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
@@ -205,8 +188,7 @@ with tab_off:
         if pred and pred.get("fit_results") is not None:
             seasons_str = " → ".join(str(s) for s in pred["seasons"])
             age_str     = f"  |  Age {pred['age']:.0f}" if pred.get("age") else ""
-            _disp_pos = {"L": "LW", "R": "RW"}.get(pred["position"], pred["position"])
-            st.subheader(f"{pred['matched']}  —  {_disp_pos}  |  {pred['actual_team']}{age_str}  |  Seasons: {seasons_str}")
+            st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}  |  Seasons: {seasons_str}")
             st.caption("Predicted performance based on current weighted skill profile across all 32 teams.")
             st.pyplot(make_bar_chart(pred["fit_results"], pred["matched"], pred["actual_team"],
                                      f"{pred['matched']}  |  Current skill profile  |  Seasons: {seasons_str}"))
@@ -222,8 +204,7 @@ with tab_off:
     with off_t2:
         if pred and pred.get("next_results") is not None:
             age_str = f"  |  Age {pred['age']:.0f} → {pred['age']+1:.0f}" if pred.get("age") else ""
-            _disp_pos = {"L": "LW", "R": "RW"}.get(pred["position"], pred["position"])
-            st.subheader(f"{pred['matched']}  —  {_disp_pos}  |  {pred['actual_team']}{age_str}")
+            st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}")
             st.caption("Predicted next-season performance across all 32 teams.")
             st.pyplot(make_bar_chart(pred["next_results"], pred["matched"], pred["actual_team"],
                                      f"{pred['matched']}  |  Next season forecast"))
@@ -268,22 +249,14 @@ with tab_off:
                 st.markdown(
                     f"<h3 style='color:{color}'>"
                     f"{pred['matched']} projects as a <b>{slot}</b> player on {insertion_team} "
-                    f"(rank {rank} of {total} {'forwards' if pred['position'] in ('C','L','R','LW','RW') else 'defensemen'})"
+                    f"(rank {rank} of {total} {'forwards' if pred['position'] in ('C','L','R') else 'defensemen'})"
                     f"</h3>",
                     unsafe_allow_html=True
                 )
-                # Use NHL display positions (LW/RW/C/D) if available
-                pos_col = "nhl_position" if "nhl_position" in insertion_df.columns else "position"
-                disp_cols = ["rank","player_name", pos_col,"lineup_slot","pred_points_gp","pred_goals_gp"]
-                disp_names = ["Rank","Player","Pos","Line/Pair","Points/GP","Goals/GP"]
-                # Include line quality metrics from MoneyPuck if present
-                if "line_adj_xg_per60" in insertion_df.columns and pred.get("position") not in ("D",):
-                    disp_cols  += ["line_adj_xg_per60", "line_corsi_pct"]
-                    disp_names += ["Line xG/60", "Line Corsi%"]
-                display = insertion_df[disp_cols].copy()
-                display.columns = disp_names
-                if "Line Corsi%" in display.columns:
-                    display["Line Corsi%"] = (display["Line Corsi%"] * 100).round(1)
+                display = insertion_df[[
+                    "rank","player_name","position","lineup_slot","pred_points_gp","pred_goals_gp"
+                ]].copy()
+                display.columns = ["Rank","Player","Pos","Line/Pair","Points/GP","Goals/GP"]
                 def _hi_searched(row):
                     m = insertion_df.loc[insertion_df["player_name"]==row["Player"],"is_searched_player"].values
                     if len(m)>0 and m[0]:
@@ -293,7 +266,7 @@ with tab_off:
                              use_container_width=True,
                              height=min(50+len(display)*35,600))
                 slot_counts = display["Line/Pair"].value_counts()
-                is_fwd = pred["position"] in ("C","L","R","LW","RW")
+                is_fwd = pred["position"] in ("C","L","R")
                 slot_labels = (["1st Line","2nd Line","3rd Line","4th Line"] if is_fwd
                                else ["1st Pair","2nd Pair","3rd Pair","3rd Pair (extra)"])
                 st.markdown("**Roster slot breakdown after insertion:**")
@@ -322,6 +295,10 @@ with tab_def:
                 )
         dpred = st.session_state[_dpred_key]
 
+    # Load offensive stats for this defenseman
+    _d_off_stats, _d_off_err = load_defensive_offensive_stats() if def_models_loaded else ({}, None)
+    _pid_off = _d_off_stats.get(pred["pid"], {}) if pred else {}
+
     def_t1, def_t2, def_t3 = st.tabs(["Team Fit", "Next Season", "Pairing"])
 
     with def_t1:
@@ -333,19 +310,47 @@ with tab_def:
             st.info(f"{pred['matched']} is a forward. Search for a defenseman to use defensive tabs.")
         elif dpred:
             seasons_str = " → ".join(str(s) for s in dpred["seasons"])
-            _role, _role_color, _role_desc = classify_defenseman_role(dpred["profile"])
-            st.markdown(
-                f"### {dpred['matched']}  —  D  |  {dpred['actual_team']}  |  Seasons: {seasons_str}  "
-                f"&nbsp;<span style='background:{_role_color}22;color:{_role_color};"
-                f"padding:2px 10px;border-radius:4px;font-size:0.85em;"
-                f"border:1px solid {_role_color}'>{_role}</span>",
-                unsafe_allow_html=True
-            )
-            st.caption(
-                f"{_role_desc}  \n"
-                "Defensive Score weights: xGA/60 zone-adj 25% · Takeaways 18% · PK time 15% · "
-                "Shot blocking 13% · Take/Give ratio 12% · Hits 9% · Discipline 8%"
-            )
+            # Classify and grade
+            _sample_preds = dpred["fit_results"][dpred["fit_results"]["is_actual"]].iloc[0].to_dict() \
+                           if not dpred["fit_results"][dpred["fit_results"]["is_actual"]].empty \
+                           else dpred["fit_results"].iloc[0].to_dict()
+            # Classify using career profile (actual stats), not team-adjusted predictions
+            _profile_dict = dict(def_player_profiles[pred["pid"]][0]) if pred["pid"] in def_player_profiles else _sample_preds
+            _d_type, _d_desc = classify_defenseman_type(_profile_dict)
+            _def_grade, _def_score, _def_desc = grade_defensive_defenseman(_sample_preds)
+            _off_grade, _off_score, _off_desc = grade_offensive_defenseman(_pid_off) if _pid_off else ("—", 0, "")
+
+            st.subheader(f"{dpred['matched']}  —  {_d_type}  |  {dpred['actual_team']}  |  Seasons: {seasons_str}")
+            st.caption(_d_desc)
+
+            # Grade display
+            if _d_type == "Two-Way D":
+                gc1, gc2, gc3 = st.columns(3)
+                def _score_to_grade(s):
+                    if s >= 85: return "A"
+                    if s >= 70: return "B+"
+                    if s >= 55: return "B"
+                    if s >= 38: return "C+"
+                    if s >= 20: return "C"
+                    return "D"
+                _combined_num = _def_score * 0.5 + _off_score * 0.5
+                gc1.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
+                gc2.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
+                gc3.metric("Combined Grade", _score_to_grade(_combined_num), f"Score: {_combined_num:.0f}/100")
+            elif _d_type == "Offensive D":
+                gc1, gc2 = st.columns(2)
+                gc1.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
+                gc2.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
+                if _off_desc:
+                    st.caption(f"Offense: {_off_desc}")
+            else:
+                gc1, gc2 = st.columns(2)
+                gc1.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
+                if _pid_off:
+                    gc2.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
+                st.caption(_def_desc)
+
+            st.caption("Defensive Score: xGA suppression 30%, takeaways 20%, PK usage 20%, hits 15%, discipline 15%.")
             st.markdown("#### Rankings Table")
             display = def_show_results_table(dpred["fit_results"], dpred["actual_team"])
             csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
@@ -392,44 +397,32 @@ with tab_def:
                     feature_names=def_fit_feature_names
                 )
 
-            # New return format: (current_pairs, unassigned, player_scores, insertion_info)
-            if isinstance(pair_result, tuple) and len(pair_result) == 4:
-                current_pairs, unassigned, player_scores, insertion = pair_result
+            if isinstance(pair_result, tuple) and len(pair_result) == 6:
+                depth_pairs, scratched, player_scores, cascade_log, unmodeled, insertion = pair_result
 
-                if isinstance(current_pairs, str):
-                    # Error string returned as first element
-                    st.error(current_pairs)
+                if not depth_pairs and not player_scores:
+                    st.error(insertion.get("pair_err", "Could not build pairings. Try refreshing."))
                 else:
                     searched_name  = dpred["matched"]
                     searched_score = insertion["searched_score"]
+                    searched_info  = player_scores.get(dpred["pid"], {})
+                    searched_type  = searched_info.get("d_type", "—")
                     partner_name   = insertion["partner_name"]
                     partner_slot   = insertion["partner_slot"]
-                    pushed_out     = insertion["pushed_out_name"]
                     pair_err       = insertion.get("pair_err")
-                    missing_model_players = insertion.get("missing_model_players", [])
 
                     if pair_err:
-                        st.caption(f"Note: Could not fetch shift data ({pair_err}). Showing model-based ranking.")
+                        st.caption(f"Note: Could not fetch shift data ({pair_err}). Using model-ranked order.")
 
-                    # ── Insertion summary ──────────────────────────────────────
-                    st.markdown(
-                        f"### {searched_name} — Defensive Score: {searched_score:.1f}",
-                    )
+                    # ── Player header ──────────────────────────────────────────────
+                    st.markdown(f"### {searched_name} — {searched_type} | Combined Score: {searched_score:.0f}")
                     if partner_name != "—":
-                        st.success(
-                            f"Best fit: **{partner_slot}** alongside **{partner_name}**  \n"
-                            f"{'Replaces: **' + pushed_out + '**' if pushed_out != '—' else ''}"
-                        )
+                        st.success(f"Projected pair: **{searched_name}** with **{partner_name}** ({partner_slot})")
 
-                    # ── Current pairs table ────────────────────────────────────
+                    # ── Depth chart after insertion ────────────────────────────────
                     st.divider()
-                    st.markdown(f"#### {pair_team} Current Pairings (with model scores)")
-                    using_real = any(p.get("from_shifts") for p in current_pairs)
-                    if using_real:
-                        source_note = "✅ Derived from actual NHL shift/TOI data"
-                    else:
-                        source_note = "⚠️ Estimated from model scores (live shift data unavailable — real pairings may differ)"
-                    st.caption(f"{source_note}. Defensive Score: 0-100 composite (higher = better).")
+                    st.markdown(f"#### {pair_team} Defensive Depth Chart — After Insertion")
+                    st.caption("Gold = new player. Real pairs anchored from shift data. Cascade ripples down — weakest player scratched.")
 
                     SLOT_COLORS_PAIRS = {
                         "1st Pair": "#FFD700",
@@ -438,83 +431,123 @@ with tab_def:
                         "4th Pair": "#888888",
                     }
 
-                    for i, pair in enumerate(current_pairs):
-                        slot_label = pair.get("slot", f"Pair {i+1}")
-                        color      = SLOT_COLORS_PAIRS.get(slot_label.split()[0] + " " + slot_label.split()[1] if len(slot_label.split()) >= 2 else slot_label, "#888888")
-                        is_target_pair = (pair.get("pid1") == (insertion.get("best_partner_pid")) or
-                                          pair.get("pid2") == (insertion.get("best_partner_pid")))
+                    for pair in depth_pairs:
+                        slot_label = pair["slot"]
+                        color = SLOT_COLORS_PAIRS.get(slot_label, "#888888")
+                        p1 = player_scores.get(pair["pid1"], {})
+                        p2 = player_scores.get(pair["pid2"], {})
+                        is_new1 = pair["pid1"] == dpred["pid"]
+                        is_new2 = pair["pid2"] == dpred["pid"]
+                        type1   = p1.get("d_type", "")
+                        type2   = p2.get("d_type", "")
+                        hand1   = pair.get("shoots1", "")
+                        hand2   = pair.get("shoots2", "")
+                        hand_ok = pair.get("hand_match", False)
+                        hand_icon = "🤝" if hand_ok else ("⚠️" if (hand1 and hand2) else "")
 
-                        col_slot, col_p1, col_vs, col_p2, col_score = st.columns([1.2, 2, 0.3, 2, 1.2])
-                        col_slot.markdown(f"<span style='color:{color};font-weight:bold'>{slot_label}</span>", unsafe_allow_html=True)
-                        col_p1.markdown(f"**{pair['name1']}** ({pair['score1']:.0f})")
-                        col_vs.markdown("—")
-                        col_p2.markdown(f"**{pair['name2']}** ({pair['score2']:.0f})")
-                        col_score.markdown(f"Pair avg: **{pair['pair_score']:.0f}**")
-
-                    # ── Searched player row ────────────────────────────────────
-                    st.divider()
-                    st.markdown("#### Where the searched player fits")
-                    sp_col1, sp_col2, sp_col3 = st.columns([2, 2, 2])
-                    sp_col1.metric("Player", searched_name)
-                    sp_col2.metric("Defensive Score", f"{searched_score:.1f}")
-                    sp_col3.metric("Best Pair Slot", partner_slot)
-
-                    if partner_name != "—":
-                        st.info(
-                            f"**{searched_name}** (score {searched_score:.0f}) would pair best with "
-                            f"**{partner_name}** in the **{partner_slot}**."
-                            + (f"  \nThis would push **{pushed_out}** to a different role." if pushed_out != "—" else "")
+                        col_slot, col_p1, col_vs, col_p2, col_score = st.columns([1.2, 2.5, 0.3, 2.5, 1.0])
+                        col_slot.markdown(
+                            f"<span style='color:{color};font-weight:bold'>{slot_label}</span>"
+                            f"<br><small>{hand_icon}</small>",
+                            unsafe_allow_html=True
                         )
+                        p1_style = "color:#FFD700;font-weight:bold" if is_new1 else ""
+                        p2_style = "color:#FFD700;font-weight:bold" if is_new2 else ""
+                        hand_label1 = f" ({hand1})" if hand1 else ""
+                        hand_label2 = f" ({hand2})" if hand2 else ""
+                        col_p1.markdown(
+                            f"<span style='{p1_style}'>**{pair['name1']}**{hand_label1} ({pair['score1']:.0f})</span>  \n*{type1}*",
+                            unsafe_allow_html=True
+                        )
+                        col_vs.markdown("—")
+                        col_p2.markdown(
+                            f"<span style='{p2_style}'>**{pair['name2']}**{hand_label2} ({pair['score2']:.0f})</span>  \n*{type2}*",
+                            unsafe_allow_html=True
+                        )
+                        col_score.markdown(f"Avg: **{pair['pair_score']:.0f}**")
 
-                    # ── Coverage diagnostics ───────────────────────────────────
-                    if missing_model_players:
-                        with st.expander(f"{len(missing_model_players)} rostered D-men not in model data"):
-                            for p in missing_model_players:
-                                st.caption(f"• {p.get('player_name', str(p.get('player_id')))} — not enough historical seasons in training data")
+                    st.caption("Score = combined grade (defensive + offensive weighted by player type).")
 
-                    if unassigned:
-                        with st.expander(f"{len(unassigned)} rostered D-men in model but not found in recent shift pair data"):
-                            for pid in unassigned:
-                                name = player_scores.get(pid, {}).get("player_name", str(pid))
-                                st.caption(f"• {name} — no recent shared-shift pairing found")
+                    # ── Scratched players ──────────────────────────────────────────
+                    if scratched:
+                        st.divider()
+                        st.markdown("#### Scratched / Excess D-men")
+                        scratch_cols = st.columns(min(len(scratched), 4))
+                        for col, pid in zip(scratch_cols, scratched):
+                            info = player_scores.get(pid, {})
+                            col.metric(
+                                info.get("player_name", str(pid)),
+                                f"Score: {info.get('combined_score', 0):.0f}",
+                                info.get("d_type", ""),
+                            )
 
-                    # ── Full scores table ──────────────────────────────────────
+                    # ── Cascade log ────────────────────────────────────────────────
+                    if cascade_log:
+                        st.divider()
+                        st.markdown("#### Displacement Cascade")
+                        st.caption("Step-by-step ripple: each displaced player finds their next best slot.")
+                        for i, entry in enumerate(cascade_log):
+                            action = entry.get("action", "")
+                            player = entry.get("player", "")
+                            slot   = entry.get("slot", "—")
+                            disp   = entry.get("displaced", "—")
+                            is_new = player == searched_name
+
+                            if action == "scratched":
+                                st.markdown(
+                                    f"<span style='color:#c8102e'>✗</span> "
+                                    f"**{player}** could not improve any pair → **Scratched**",
+                                    unsafe_allow_html=True
+                                )
+                            else:
+                                color = "#FFD700" if is_new else "#4a90d9"
+                                disp_str = f" (displaces {disp})" if disp != "—" else ""
+                                st.markdown(
+                                    f"<span style='color:{color}'>↓</span> "
+                                    f"**{player}** → **{slot}**{disp_str}",
+                                    unsafe_allow_html=True
+                                )
+
+                    # ── Players not in model ───────────────────────────────────────
+                    if unmodeled:
+                        with st.expander(f"{len(unmodeled)} rostered D-men not in model data"):
+                            for pid in unmodeled:
+                                name = def_player_profiles.get(pid, ({"player_name": str(pid)},))[0].get("player_name", str(pid))
+                                st.caption(f"• {name} — not enough historical seasons in training data")
+
+                    # ── Full scores table ──────────────────────────────────────────
                     with st.expander("Full model scores for all D-men"):
                         rows_table = []
                         for pid, info in player_scores.items():
                             rows_table.append({
                                 "Player":    info["player_name"],
+                                "Type":      info.get("d_type", "—"),
+                                "Combined":  info.get("combined_score", info["defensive_score"]),
                                 "Def Score": info["defensive_score"],
                                 "Hits/GP":   round(info.get("ind_hits_pg", 0), 2),
                                 "TK/GP":     round(info.get("ind_takeaways_pg", 0), 3),
-                                "GA/GP":     round(info.get("goals_against_per60", 0), 3),
+                                "xGA/60":    round(info.get("xg_against_per60_5v5", 0), 3),
                                 "PK%":       round(info.get("pk_ice_pct", 0) * 100, 1),
                                 "PIM/GP":    round(info.get("pim_pg", 0), 2),
                                 "Is New Player": info.get("is_searched_player", False),
                             })
-                        scores_df = pd.DataFrame(rows_table).sort_values("Def Score", ascending=False)
-                        display_scores_df = scores_df.drop(columns=["Is New Player"], errors="ignore")
+                        scores_df   = pd.DataFrame(rows_table).sort_values("Combined", ascending=False).reset_index(drop=True)
+                        is_new_mask = scores_df["Is New Player"].values
+                        display_df  = scores_df.drop(columns="Is New Player")
 
                         def _hi_new(row):
-                            is_new = False
-                            if "Is New Player" in scores_df.columns:
-                                is_new = bool(scores_df.loc[row.name, "Is New Player"])
-                            if is_new:
-                                return ["background-color:#FFD70022;font-weight:bold"] * len(row)
-                            return [""] * len(row)
+                            return (
+                                ["background-color:#FFD70022;font-weight:bold"] * len(row)
+                                if is_new_mask[row.name] else [""] * len(row)
+                            )
 
-                        st.dataframe(
-                            display_scores_df.style.apply(_hi_new, axis=1),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-
-                        csv_rows = pd.DataFrame(rows_table).to_csv(index=False)
-                        st.download_button("Download pairing CSV", data=csv_rows,
+                        st.dataframe(display_df.style.apply(_hi_new, axis=1),
+                                     use_container_width=True, hide_index=True)
+                        st.download_button("Download pairing CSV",
+                                           data=pd.DataFrame(rows_table).to_csv(index=False),
                                            file_name=f"{dpred['matched'].replace(' ','_')}_{pair_team}_pairing.csv",
                                            mime="text/csv")
             else:
-                # Fallback for unexpected return format
                 st.error("Unexpected result from pairing function. Try refreshing.")
 
 # ── Contract Evaluator ────────────────────────────────────────────────────────
@@ -564,48 +597,14 @@ with tab_contract:
 
         curr_age = float(curr_age) if curr_age and not (isinstance(curr_age, float) and curr_age != curr_age) else 28.0
 
-        # CBA hard limits
+        # CBA limits based on signing team
         cba = get_cba_limits(curr_age, pred["actual_team"], contract_team)
-
-        # Build a full max-year projection so we can recommend length from
-        # actual predicted values rather than just the age curve.
-        with st.spinner("Building projection for contract recommendation..."):
-            _rec_rows, _rec_err = build_contract_projection(
-                pred["matched"], pred, dpred if is_d_contract else None,
-                df, team_ctx, fit_models, next_models, player_profiles, has_age,
-                def_df if def_models_loaded else pd.DataFrame(),
-                def_team_ctx if def_models_loaded else pd.DataFrame(),
-                def_fit_models if def_models_loaded else {},
-                def_player_profiles if def_models_loaded else {},
-                def_has_age if def_models_loaded else False,
-                contract_team, cba["max_years"],
-                def_fit_feature_names=def_fit_feature_names if def_models_loaded else None,
-            )
-        # Get team roster cutline (4th-line or 3rd-pair threshold score)
-        with st.spinner("Checking team roster threshold..."):
-            _cutline, _cutline_label = get_roster_cutline(
-                contract_team, is_d_contract,
-                df, team_ctx, fit_models, player_profiles, has_age,
-                def_df=def_df if def_models_loaded else None,
-                def_team_ctx=def_team_ctx if def_models_loaded else None,
-                def_fit_models=def_fit_models if def_models_loaded else None,
-                def_player_profiles=def_player_profiles if def_models_loaded else None,
-                def_has_age=def_has_age if def_models_loaded else False,
-                def_feature_names=def_fit_feature_names if def_models_loaded else None,
-            )
-
-        perf_rec, perf_rec_explanation = recommend_contract_length(
-            _rec_rows or [], is_d_contract, cba["max_years"], curr_age,
-            roster_cutline=_cutline, cutline_label=_cutline_label,
-        )
-        # Respect the CBA hard cap
-        cba["recommended"] = perf_rec
 
         n_years = cc2.slider(
             "Contract length (years)",
             min_value=1,
             max_value=cba["max_years"],
-            value=min(perf_rec, cba["max_years"]),
+            value=min(cba["recommended"], cba["max_years"]),
         )
         cc3.metric("Current Age", f"{curr_age:.0f}")
 
@@ -614,7 +613,7 @@ with tab_contract:
         signing_type = "Re-signing (same team)" if cba["is_same_team"] else "New signing (different team)"
         cba_cols[0].metric("Signing Type",    signing_type)
         cba_cols[1].metric("CBA Max Length",  f"{cba['max_years']} years")
-        cba_cols[2].metric("Recommended Max", f"{perf_rec} years")
+        cba_cols[2].metric("Recommended Max", f"{cba['recommended']} years")
         cba_cols[3].metric("Age at Expiry",   f"{cba['age_at_expiry']:.0f}")
 
         # 35+ rule warning
@@ -630,10 +629,10 @@ with tab_contract:
                 "If they retire before expiry, the cap hit remains on your books."
             )
 
-        if n_years > perf_rec:
+        if n_years > cba["recommended"]:
             st.warning(
-                f"This contract exceeds the model recommendation of {perf_rec} year(s). "
-                f"Years {perf_rec+1}+ carry high uncertainty based on projected performance."
+                f"This contract is longer than the recommended maximum of {cba['recommended']} years "
+                f"based on the player's age curve. Years {cba['recommended']+1}+ carry high uncertainty."
             )
 
         # ── Run projection ─────────────────────────────────────────────────────
@@ -673,7 +672,7 @@ with tab_contract:
                     "Year":          f"Year {r['year']} (Age {r['age']:.0f})",
                     "Hits/GP":       r["hits_pg"],
                     "Takeaways/GP":  r["takeaways_pg"],
-                    "GA/GP (5v5)":   r["goals_against_pg"],
+                    "xGA/60 (5v5)":  r["goals_against_pg"],
                     "PK%":           f"{r['pk_pct']*100:.1f}%",
                     "PIM/GP":        r["pim_pg"],
                     "Def Score":     r["def_score"],
@@ -769,8 +768,8 @@ with tab_contract:
             )
             rule35_note = "35+ rule applies — cap recapture risk if player retires early." if cba["hits_35_rule"] else "No 35+ rule concerns."
             rec_col2.success(
-                f"Model recommendation: **{perf_rec} years**  \n"
-                f"{perf_rec_explanation}  \n"
+                f"Model recommendation: **{cba['recommended']} years**  \n"
+                f"Based on age {curr_age:.0f} trajectory.  \n"
                 f"{rule35_note}"
             )
 
