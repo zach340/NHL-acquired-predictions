@@ -422,6 +422,12 @@ def compute_target_baseline(df_like, target_col):
 def make_elite_sample_weights(y):
     """Upweight high-end outcomes so the model spends more capacity on elite players."""
     arr = np.asarray(y, dtype=float)
+    weights = np.ones(len(arr), dtype=float)
+    if len(arr) == 0:
+        return weights
+    elite_cut = np.quantile(arr, ELITE_QUANTILE)
+    weights[arr >= elite_cut] = 3.0
+    return weights
 
 def _load_ages(ages_path):
     """
@@ -2360,65 +2366,42 @@ def def_fetch_team_roster_d(team_code):
         return []
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)   # 6-hour TTL — season data barely changes
 def fetch_actual_pairs(team_code, d_pids=None):
     """
-    Fetch actual D-pair combinations from NHL shift chart data.
+    Fetch actual D-pair combinations from NHL shift chart data for the full
+    current season (not just the last 10 games).
     d_pids: frozenset of defenseman player IDs to filter shifts.
     Returns a list of (pid1, pid2, shared_seconds) sorted by shared TOI desc.
     """
     # Convert to set for fast lookup (cache receives frozenset)
     d_pids_set = set(d_pids) if d_pids else None
     try:
-        import datetime
         from collections import defaultdict
 
-        # Use the stats rest API for recent games — more reliable than schedule
-        # Get team's recent game log for current season
-        games_url = (
-            f"https://api.nhle.com/stats/rest/en/team/summary"
-            f"?cayenneExp=seasonId=20252026 and teamAbbrevs={team_code}"
-            f"&limit=1"
-        )
+        # Fetch the full current-season schedule in one call
+        sched_url = f"https://api-web.nhle.com/v1/club-schedule-season/{team_code}/now"
+        resp = requests.get(sched_url, timeout=15)
+        resp.raise_for_status()
+        all_games = resp.json().get("games", [])
 
-        # Fall back to schedule endpoint for game IDs
-        finished = []
-        for week_offset in [0, 1, 2, 3, 4, 5]:
-            check_date = (datetime.date.today() - datetime.timedelta(weeks=week_offset)).strftime("%Y-%m-%d")
-            sched_url  = f"https://api-web.nhle.com/v1/club-schedule/{team_code}/week/{check_date}"
-            try:
-                resp = requests.get(sched_url, timeout=10)
-                if resp.ok:
-                    week_games = resp.json().get("games", [])
-                    # Accept any game that is not upcoming
-                    done = [g for g in week_games
-                            if g.get("gameState") not in ("FUT", "PRE", "PREVIEW")
-                            and g.get("gameType", 2) == 2]  # regular season only
-                    finished.extend(done)
-            except Exception:
-                continue
-            if len(finished) >= 5:
-                break
-
-        # Deduplicate by id
-        seen = set()
-        unique_finished = []
-        for g in finished:
-            gid = g.get("id")
-            if gid and gid not in seen:
-                seen.add(gid)
-                unique_finished.append(g)
-        finished = sorted(unique_finished, key=lambda g: g.get("gameDate", ""), reverse=True)
+        # Keep only finished regular-season games
+        finished = [
+            g for g in all_games
+            if g.get("gameType", 2) == 2                              # regular season
+            and g.get("gameState") not in ("FUT", "PRE", "PREVIEW")  # already played
+        ]
+        finished = sorted(finished, key=lambda g: g.get("gameDate", ""), reverse=True)
 
         if not finished:
-            return [], "No recent finished games found for this team."
+            return [], "No finished regular-season games found for this team."
 
-        # Build shared TOI matrix from shifts
+        # Build shared TOI matrix from shifts across ALL season games
         pair_toi = defaultdict(int)  # (pid1, pid2) -> shared seconds
         errors   = []
         games_processed = 0
 
-        for game in finished[:10]:
+        for game in finished:   # ← no cap — full season
             game_id = game.get("id")
             if not game_id:
                 continue
@@ -2595,13 +2578,108 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     d_pids = set(roster_pids.keys()) | {player_id}
     actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids))
 
-    # 4. Build baseline pairs from shift data (without new player)
-    #    Then cascade the new player in, rippling displaced players down.
+    SLOT_NAMES      = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]
+    MAX_DISPLAY     = 3
+    MAX_BUILD_PAIRS = 4
 
-    SLOT_NAMES  = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]
-    MAX_ACTIVE  = 6   # 3 pairs of 2
+    # ── Returning-player fast path ─────────────────────────────────────────────
+    # If the searched player is already on this team's roster, skip the cascade
+    # entirely and just show the real season-long pairs with them highlighted.
+    if player_id in roster_pids:
+        depth_pairs  = []
+        assigned     = set()
+        cascade_log  = []   # no cascade happened
+        scratched    = []
 
-    # Start with shift-derived pairs (excluding the new player)
+        # Build pairs from shift TOI data — include the searched player this time
+        if actual_pairs:
+            for pid1, pid2, toi in actual_pairs:
+                if pid1 not in player_scores or pid2 not in player_scores:
+                    continue
+                if pid1 in assigned or pid2 in assigned:
+                    continue
+                shoots1  = player_scores[pid1].get("shoots", "")
+                shoots2  = player_scores[pid2].get("shoots", "")
+                hand_ok  = bool(shoots1 and shoots2 and shoots1 != shoots2)
+                depth_pairs.append({
+                    "pid1":       pid1,
+                    "pid2":       pid2,
+                    "name1":      player_scores[pid1]["player_name"],
+                    "name2":      player_scores[pid2]["player_name"],
+                    "score1":     player_scores[pid1]["combined_score"],
+                    "score2":     player_scores[pid2]["combined_score"],
+                    "shoots1":    shoots1,
+                    "shoots2":    shoots2,
+                    "hand_match": hand_ok,
+                    "pair_score": round((player_scores[pid1]["combined_score"] +
+                                         player_scores[pid2]["combined_score"]) / 2, 1),
+                    "from_shifts": True,
+                    "slot":       "",
+                    "slot_color": "",
+                })
+                assigned.update([pid1, pid2])
+                if len(depth_pairs) == MAX_DISPLAY:
+                    break
+
+        # Fill any remaining slots from unassigned pool if shift data was sparse
+        unassigned_pool = [
+            pid for pid in player_scores
+            if pid not in assigned and pid in roster_pids
+        ]
+        unassigned_pool.sort(key=lambda p: player_scores[p]["combined_score"], reverse=True)
+        while len(depth_pairs) < MAX_DISPLAY and len(unassigned_pool) >= 2:
+            pid1 = unassigned_pool.pop(0)
+            pid2 = unassigned_pool.pop(0)
+            shoots1  = player_scores[pid1].get("shoots", "")
+            shoots2  = player_scores[pid2].get("shoots", "")
+            hand_ok  = bool(shoots1 and shoots2 and shoots1 != shoots2)
+            depth_pairs.append({
+                "pid1":       pid1,
+                "pid2":       pid2,
+                "name1":      player_scores[pid1]["player_name"],
+                "name2":      player_scores[pid2]["player_name"],
+                "score1":     player_scores[pid1]["combined_score"],
+                "score2":     player_scores[pid2]["combined_score"],
+                "shoots1":    shoots1,
+                "shoots2":    shoots2,
+                "hand_match": hand_ok,
+                "pair_score": round((player_scores[pid1]["combined_score"] +
+                                     player_scores[pid2]["combined_score"]) / 2, 1),
+                "from_shifts": False,
+                "slot":       "",
+                "slot_color": "",
+            })
+            assigned.update([pid1, pid2])
+
+        # Assign slot labels in TOI order
+        for i, pair in enumerate(depth_pairs):
+            slot = SLOT_NAMES[i] if i < len(SLOT_NAMES) else f"Pair {i+1}"
+            pair["slot"] = slot
+            pair["slot_color"] = DEF_PAIR_COLORS.get(" ".join(slot.split()[:2]), "#888888")
+
+        # Find this player's partner and slot
+        best_partner_name = "—"
+        best_partner_slot = "—"
+        searched_score    = player_scores[player_id]["combined_score"]
+        for pair in depth_pairs:
+            if pair["pid1"] == player_id:
+                best_partner_name = pair["name2"]
+                best_partner_slot = pair["slot"]
+            elif pair["pid2"] == player_id:
+                best_partner_name = pair["name1"]
+                best_partner_slot = pair["slot"]
+
+        unmodeled = [pid for pid in roster_pids if pid not in player_scores]
+        return depth_pairs, scratched, player_scores, cascade_log, unmodeled, {
+            "partner_name":    best_partner_name,
+            "partner_slot":    best_partner_slot,
+            "searched_score":  searched_score,
+            "pair_err":        pair_err,
+            "actual_pairs":    actual_pairs,
+        }
+
+    # 4. Player is from another team — build baseline pairs (without new player)
+    #    then cascade them in, rippling displaced players down.
     baseline_pairs = []
     assigned = set()
     if actual_pairs:
@@ -2622,19 +2700,21 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     ]
     # Fill remaining pair slots with unassigned players (sorted by score)
     unassigned_pool.sort(key=lambda p: player_scores[p]["combined_score"], reverse=True)
-    while len(baseline_pairs) < MAX_ACTIVE // 2 and len(unassigned_pool) >= 2:
+    while len(baseline_pairs) < MAX_BUILD_PAIRS and len(unassigned_pool) >= 2:
         baseline_pairs.append([unassigned_pool.pop(0), unassigned_pool.pop(0)])
     remaining_solo = unassigned_pool  # odd man out
 
     # ── Cascade insertion ──────────────────────────────────────────────────────
     # The new player "tries out" for each pair slot from top to bottom.
     # If they outscore the weaker partner in a pair, they take that spot.
-    # The displaced player then cascades down to try the next pair, etc.
+    # The displaced player then cascades DOWN to try the next pair only —
+    # start_from ensures no displaced player can leapfrog back up the chart.
 
     cascade_log  = []   # track each move: (player, action, slot)
     final_pairs  = [list(p) for p in baseline_pairs]  # mutable copy
     to_place     = player_id   # start: new player needs a slot
     scratched    = []
+    start_from   = 0   # minimum pair index the current to_place may try
 
     MAX_ITER = len(final_pairs) + 2
     for iteration in range(MAX_ITER):
@@ -2643,6 +2723,8 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
         new_shoots = player_scores[to_place].get("shoots", "")
 
         for i, pair in enumerate(final_pairs):
+            if i < start_from:          # only try pairs at or below displacement point
+                continue
             p1, p2   = pair
             s1       = player_scores[p1]["combined_score"]
             s2       = player_scores[p2]["combined_score"]
@@ -2668,8 +2750,9 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
                 })
                 # Replace weaker in pair
                 pair[pair.index(weaker)] = to_place
-                to_place = weaker  # displaced player now needs a slot
-                placed   = True
+                start_from = i + 1      # displaced player can only go lower than here
+                to_place   = weaker     # displaced player now needs a slot
+                placed     = True
                 break
 
         if not placed:
@@ -2710,8 +2793,12 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
             ) if actual_pairs else False,
         })
 
-    # Keep only the top 3 pairs by score for downstream UI/API consumers.
-    depth_pairs = sorted(depth_pairs, key=lambda p: p["pair_score"], reverse=True)[:3]
+    # Slot labels are assigned by cascade order (shift-TOI order with new player inserted).
+    # No score-based re-sort — the cascade already placed every player into the highest
+    # slot they could earn. Re-sorting by score contradicts the cascade and causes
+    # the searched player's pair to jump or fall based on their partner's score rather
+    # than their own merit.
+    depth_pairs = depth_pairs[:MAX_DISPLAY]
     for i, pair in enumerate(depth_pairs):
         slot = SLOT_NAMES[i] if i < len(SLOT_NAMES) else f"Pair {i+1}"
         pair["slot"] = slot

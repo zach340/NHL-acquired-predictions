@@ -421,8 +421,12 @@ with tab_def:
 
                     # ── Depth chart after insertion ────────────────────────────────
                     st.divider()
-                    st.markdown(f"#### {pair_team} Defensive Depth Chart — After Insertion")
-                    st.caption("Gold = new player. Real pairs anchored from shift data. Cascade ripples down — weakest player scratched.")
+                    is_returning = dpred["pid"] in {p["player_id"] for p in (def_fetch_team_roster_d(pair_team) or [])}
+                    chart_title  = f"#### {pair_team} Defensive Depth Chart — Current Pairs" if is_returning else f"#### {pair_team} Defensive Depth Chart — After Insertion"
+                    chart_caption = ("Gold = highlighted player. Season-long shift pairs shown as-is." if is_returning
+                                     else "Gold = new player. Pairs anchored from season-long shift data. Cascade ripples down — weakest player scratched.")
+                    st.markdown(chart_title)
+                    st.caption(chart_caption)
 
                     SLOT_COLORS_PAIRS = {
                         "1st Pair": "#FFD700",
