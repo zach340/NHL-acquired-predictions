@@ -1087,9 +1087,6 @@ def build_defensive_validation(actual_df, def_df, def_team_ctx,
             "actual_tk_pg":   round(float(actual.get("takeaways_pg",  0)), 3),
             "pred_tk_pg":     round(preds.get("ind_takeaways_pg",     0), 3),
             "tk_error":       round(float(actual.get("takeaways_pg",  0)) - preds.get("ind_takeaways_pg", 0), 3),
-            "actual_pk_pct":  round(float(actual.get("pk_ice_pct",   0)), 4),
-            "pred_pk_pct":    round(preds.get("pk_ice_pct",           0), 4),
-            "pk_error":       round(float(actual.get("pk_ice_pct",   0)) - preds.get("pk_ice_pct", 0), 4),
             "actual_pim_pg":  round(float(actual.get("pim_pg",       0)), 3),
             "pred_pim_pg":    round(preds.get("pim_pg",               0), 3),
             "pim_error":      round(float(actual.get("pim_pg",       0)) - preds.get("pim_pg", 0), 3),
@@ -1712,16 +1709,14 @@ DEF_TARGETS = [
     "ind_hits_pg",
     "ind_takeaways_pg",
     "xg_against_per60_5v5",
-    "pk_ice_pct",
     "pim_pg",
 ]
 
 DEF_TARGET_LABELS = {
-    "ind_hits_pg":              "Hits / Game",
-    "ind_takeaways_pg":         "Takeaways / Game",
-    "xg_against_per60_5v5":     "xGA Against / 60 (5v5)",
-    "pk_ice_pct":               "PK Ice Time %",
-    "pim_pg":               "PIM / Game",
+    "ind_hits_pg":           "Hits / Game",
+    "ind_takeaways_pg":      "Takeaways / Game",
+    "xg_against_per60_5v5": "xGA Against / 60 (5v5)",
+    "pim_pg":                "PIM / Game",
 }
 
 # Lower is better for these targets
@@ -1729,11 +1724,10 @@ DEF_LOWER_IS_BETTER = {"xg_against_per60_5v5", "pim_pg"}
 
 # Defensive score weights (used for pairing)
 DEF_SCORE_WEIGHTS = {
-    "ind_hits_pg":              0.15,
-    "ind_takeaways_pg":         0.20,
-    "xg_against_per60_5v5":    0.30,  # most important
-    "pk_ice_pct":               0.20,
-    "pim_pg":               0.15,
+    "ind_hits_pg":           0.15,
+    "ind_takeaways_pg":      0.25,  # up from 0.20
+    "xg_against_per60_5v5": 0.40,  # up from 0.30 — most important
+    "pim_pg":                0.20,  # up from 0.15
 }
 
 # Pairing slot definitions
@@ -1750,11 +1744,10 @@ DEF_PAIR_COLORS = {
 # ── Baseline features (leakage-safe prior season history) ──────────────────────
 
 DEF_BASELINE_FEATURES = {
-    "ind_hits_pg":             ["prev_season_hits_pg",     "recent_3yr_mean_hits_pg",     "career_prev_mean_hits_pg"],
-    "ind_takeaways_pg":        ["prev_season_takeaways_pg","recent_3yr_mean_takeaways_pg","career_prev_mean_takeaways_pg"],
-    "xg_against_per60_5v5":  ["prev_season_xga_pg",      "recent_3yr_mean_xga_pg",      "career_prev_mean_xga_pg"],
-    "pk_ice_pct":              ["prev_season_pk_pct",      "recent_3yr_mean_pk_pct",      "career_prev_mean_pk_pct"],
-    "pim_pg":               ["prev_season_pim_pg","recent_3yr_mean_pim_pg","career_prev_mean_pim_pg"],
+    "ind_hits_pg":           ["prev_season_hits_pg",     "recent_3yr_mean_hits_pg",     "career_prev_mean_hits_pg"],
+    "ind_takeaways_pg":      ["prev_season_takeaways_pg","recent_3yr_mean_takeaways_pg","career_prev_mean_takeaways_pg"],
+    "xg_against_per60_5v5": ["prev_season_xga_pg",      "recent_3yr_mean_xga_pg",      "career_prev_mean_xga_pg"],
+    "pim_pg":                ["prev_season_pim_pg",      "recent_3yr_mean_pim_pg",      "career_prev_mean_pim_pg"],
 }
 
 # ── Player features ────────────────────────────────────────────────────────────
@@ -2261,8 +2254,7 @@ def def_compute_defensive_score(df_preds, season_df=None):
     LEAGUE_RANGES = {
         "ind_hits_pg":           (0.0,  3.5),
         "ind_takeaways_pg":      (0.0,  0.65),
-        "xg_against_per60_5v5": (1.8,  3.5),  # xGA per 60 5v5
-        "pk_ice_pct":            (0.0,  0.18),
+        "xg_against_per60_5v5": (1.8,  3.5),
         "pim_pg":                (0.0,  1.2),
     }
 
@@ -2843,9 +2835,9 @@ def def_build_pairing_insertion(player_id, team_code, df, team_ctx,
 
 def def_make_bar_chart(results, player_name, actual_team, title):
     metric_cols   = ["ind_hits_pg", "ind_takeaways_pg",
-                     "xg_against_per60_5v5", "pk_ice_pct", "defensive_score"]
+                     "xg_against_per60_5v5", "pim_pg", "defensive_score"]
     metric_labels = ["Hits / Game", "Takeaways / Game",
-                     "Goals Against / 60", "PK Ice %", "Defensive Score"]
+                     "xGA Against / 60", "PIM / Game", "Defensive Score"]
 
     fig, axes = plt.subplots(1, 5, figsize=(28, 8))
     fig.patch.set_facecolor("#0e1117")
@@ -2877,16 +2869,15 @@ def def_make_bar_chart(results, player_name, actual_team, title):
 def def_show_results_table(results, actual_team):
     display = results[[
         "player_team", "ind_hits_pg", "ind_takeaways_pg",
-        "xg_against_per60_5v5", "pk_ice_pct", "pim_pg",
+        "xg_against_per60_5v5", "pim_pg",
         "defensive_score", "is_actual"
     ]].copy()
     display.columns = [
         "Team", "Hits/GP", "TK/GP", "xGA/60",
-        "PK%", "PEN/GP", "Def Score", "Actual Team"
+        "PEN/GP", "Def Score", "Actual Team"
     ]
     for col in ["Hits/GP", "TK/GP", "xGA/60", "PEN/GP", "Def Score"]:
         display[col] = display[col].round(3)
-    display["PK%"] = (display["PK%"] * 100).round(1)
     st.dataframe(
         display.style.apply(
             lambda row: ["background-color: #3a1a1a" if row["Actual Team"] else "" for _ in row],
@@ -3099,7 +3090,6 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
                 "hits_pg":        round(max(preds.get("ind_hits_pg", 0), 0), 2),
                 "takeaways_pg":   round(max(preds.get("ind_takeaways_pg", 0), 0), 3),
                 "goals_against_pg": round(max(preds.get("xg_against_per60_5v5", 0), 0), 3),
-                "pk_pct":         round(max(preds.get("pk_ice_pct", 0), 0), 3),
                 "pim_pg":         round(max(preds.get("pim_pg", 0), 0), 3),
                 "def_score":      None,
             }
@@ -3107,7 +3097,6 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
             from_preds = {"ind_hits_pg": row["hits_pg"],
                           "ind_takeaways_pg": row["takeaways_pg"],
                           "xg_against_per60_5v5": row["goals_against_pg"],
-                          "pk_ice_pct": row["pk_pct"],
                           "pim_pg": row["pim_pg"]}
             tmp = pd.DataFrame([from_preds])
             row["def_score"] = round(def_compute_defensive_score(tmp)["defensive_score"].iloc[0], 1)
