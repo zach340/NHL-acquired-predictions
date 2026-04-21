@@ -3334,8 +3334,12 @@ def contract_risk_rating(rows, is_d):
 
     if age_yr1 >= 35:
         return "Very High Risk", "#c8102e", f"Age {age_yr1:.0f} at signing — steep decline likely. 35+ rule applies."
-    elif age_yr1 >= 32 and decline_pts > 15:
+    elif age_yr1 >= 33:
+        return "High Risk", "#e8622a", f"Age {age_yr1:.0f} at signing — physical decline likely in later years of contract."
+    elif age_yr1 >= 32 and decline_pts > 8:
         return "High Risk", "#e8622a", f"Age {age_yr1:.0f} — projected {decline_pts:.0f} percentile point decline over {n} years."
+    elif age_yr1 >= 32:
+        return "Moderate Risk", "#FFD700", f"Age {age_yr1:.0f} — entering decline window, monitor later contract years closely."
     elif age_yr1 >= 30 and decline_pts > 8:
         return "Moderate Risk", "#FFD700", f"Age {age_yr1:.0f} — some decline expected but manageable."
     elif decline_pts < -5 and age_yr1 < 30:
