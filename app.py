@@ -1076,22 +1076,111 @@ with tab_intro:
 # ── Literature Review ─────────────────────────────────────────────────────────
 with tab_lit:
     st.subheader("Literature Review")
-    st.caption("An overview of existing research and sources relevant to this project.")
+    st.caption("A survey of existing work on NHL trade and signing valuation using data analytics.")
     st.markdown(
         """
-        some examples are NHL EDGE stats: Rantanen’s outlook after trade to Hurricanes | NHL.com, Hockey Analytics – 
-        Getting data directly from the NHL Api – Hockey-Statistics, 
-        and  abeck2309/nhl-trade-roi-xgar: Evaluating NHL trades using realized and expected xGAR. T
-        hese websites use some data analytics to look at how the new teams will perform with trades. 
-        The Rantanen post has good depth about how they performed at their old team but lacks the future projections that could be extracted.
-        The Hockey Analytics article is a good way to get data directly from NHL and how to build different ways to scrape the NHL website 
-        for its data without having to worry about some of the finer details. This is like AAZZAZRON/TradeTracker: A Discord bot that scrapes
-         Sportsnet to find the most recent NHL trades and signings which scrapes Sportsnet which is the Canadian version of ESPN and imports
-         the details of trades and signings. This is a little out of scope right now for me but would be good for the future when looking 
-         for financial impacts.
+        ## What Do We Know?
+
+        Right now a lot of people try to look at trades and see how well they are doing but a lot of this is a 
+        reflectivelook and looking back at how a player did after the trade and not looking forward to how they 
+        will do with their new team. 
+        PRedicting how player will do on new teams is hard because there are factors off the ice
+        that can influence performance such as how they fit in the new system, how they get along with new teammates, 
+        and how they adjust to a new city.
+        Several existing sources demonstrate that data analytics can be applied to evaluate
+        how NHL trades and signings affect team performance, though each approach has meaningful limitations.
+
+        ---
+
+        ### NHL EDGE Stats: Rantanen's Outlook After Trade to the Hurricanes — NHL.com
+
+        NHL.com's EDGE stats platform published an in-depth breakdown of Mikko Rantanen following
+        his trade to the Carolina Hurricanes. The piece provides strong descriptive depth on how
+        Rantanen performed with his previous team, drawing on tracking-level data such as shot
+        quality and on-ice impacts.
+
+        The article looks at speed and line production, between both players and 
+        makes veauge predictions about how Rantanen will do in Carolina and how the other player 
+        will do in Colorado, but it is mostly focused on how he did in Colorado and not how he will do in Carolina or predicting any actual
+        performance metrics.
+        However, the analysis is entirely backward-looking — it describes what happened rather
+        than projecting what Rantanen is likely to produce in Carolina. This is the core gap
+        this project aims to fill: moving from descriptive post-trade reporting to predictive
+        modeling of future performance on a new team.
+
+        ---
+
+        ### Hockey Analytics - Getting Data Directly from the NHL API - Hockey-Statistics
+
+        The Hockey-Statistics blog provides a practical walkthrough of how to query the NHL's
+        public API to retrieve player and game data without relying on third-party aggregators.
+        It outlines several methods for structuring requests and handling the data returned,
+        making it a useful methodological foundation for any hockey analytics project.
+
+        they used different endpoints depending on the type of data they wanted to retrieve, 
+        such as player stats, game logs, or team information. 
+        I used the same API as the Website to validate the model predictions against live NHL data, 
+        so understanding how to work with the NHL API was crucial. it was also crucial to understand
+        how to store the data and how we can use the api as a tool.
+
+        This source is less about trade valuation specifically and more about infrastructure -
+        it informs *how* data can be collected reliably, which underpins the entire analytical
+        pipeline this project depends on.
+
+        ---
+
+        ### abeck2309/nhl-trade-roi-xgar — Evaluating NHL Trades Using Realized and Expected xGAR
+
+        This GitHub project takes a quantitative approach to trade valuation by using
+        Goals Above Replacement (xGAR) as a framework for measuring return on investment
+        in NHL trades. By comparing what was given up versus what was gained in terms of
+        realized value, it offers a more rigorous method than simple point totals.
+
+        They did a good job of trying to look forward in these trades and not just looking back at how the players did after the trade
+        but they still heavly relied on relized metrics with a little of the forward-looking analysis.
+        They also only focused on expeted Goals above relplacement and not looking at total points so if someone
+        is a skilled passer and play maker they will rack up points but their exepected goals above replacement might be lower because they
+        are not shooting the puck as much but they are still a very valuable player.
+        so there is some trade offs but overall this was a really good place for me to
+        start and seee where I wanted to go with this project and how I wanted to look at the data and what I wanted to predict.
+        Like the NHL EDGE piece, this approach is grounded in *realized* value- what
+        players actually produced after a trade. It does not attempt to forecast future
+        performance, leaving open the question of how to evaluate a trade at the moment
+        it is made rather than in hindsight.
+
+        ---
+
+        ### AAZZAZRON/TradeTracker — A Discord Bot Scraping Sportsnet for Trades and Signings
+
+        TradeTracker is a Discord bot that automatically scrapes Sportsnet — the Canadian
+        equivalent of ESPN — to detect and import the details of recent NHL trades and signings.
+        While it does not perform any valuation analysis itself, it demonstrates that automated
+        event detection for player movement is feasible and could serve as a data feed for
+        downstream models.
+
+        > 📝 *Add a sentence or two on the technical approach: how does the scraper work?
+        > What data fields does it capture (player names, teams, assets exchanged, cap hits)?*
+
+        This source is currently out of scope for this project, as incorporating contract
+        financial data and salary cap implications adds significant complexity. However, it
+        points to a natural future direction: combining automated trade detection with the
+        predictive models built here to produce real-time contract and trade valuations.
+
+        ---
+
+        ## What Do We Not Know?
+
+        The reviewed sources collectively demonstrate that the tools and data exist to
+        analyze NHL trades analytically. What is missing is a unified, forward-looking
+        approach: a model that takes a player at the moment of a trade or signing and
+        projects their likely performance *on their new team*, accounting for system fit,
+        team context, and age trajectory. This is the gap this project addresses.
+
+        > 📝 *Strengthen this closing paragraph: restate your specific research question,
+        > and explain in one or two sentences why the existing literature does not answer it.
+        > This is the most important paragraph in the entire review.*
         """
     )
-
 # ── Methodology ───────────────────────────────────────────────────────────────
 with tab_method:
     st.subheader("Research Methodology")
