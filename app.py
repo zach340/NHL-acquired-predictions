@@ -6,7 +6,25 @@ All model logic lives in model_utils.py.
 
 Run with:  python -m streamlit run app.py
 """
+import os
+import gdown
 
+DATA_FILES = {
+    "season_dataset.csv":    "YOUR_GDRIVE_FILE_ID",
+    "defensive_dataset.csv": "YOUR_GDRIVE_FILE_ID",
+    "player_ages.csv":       "YOUR_GDRIVE_FILE_ID",
+    "pp_features.csv":       "YOUR_GDRIVE_FILE_ID",
+    "linemate_features.csv": "YOUR_GDRIVE_FILE_ID",
+}
+
+for filename, file_id in DATA_FILES.items():
+    if not os.path.exists(filename):
+        st.info(f"Downloading {filename}...")
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            filename, quiet=False
+        )
+        
 import streamlit as st
 from model_utils import *
 
@@ -138,7 +156,8 @@ if player_input:
             player_input, def_df, def_team_ctx,
             def_fit_models, def_next_models, def_player_profiles, def_has_age,
             fit_feature_names=def_fit_feature_names,
-            next_feature_names=def_next_feature_names
+            next_feature_names=def_next_feature_names,
+            season_df=def_df
         )
         if def_first is not None:
             # Create a minimal pred dict so tabs know a defenseman is searched
@@ -291,12 +310,13 @@ with tab_def:
                     pred["matched"], def_df, def_team_ctx,
                     def_fit_models, def_next_models, def_player_profiles, def_has_age,
                     fit_feature_names=def_fit_feature_names,
-                    next_feature_names=def_next_feature_names
+                    next_feature_names=def_next_feature_names,
+                    season_df=def_df
                 )
         dpred = st.session_state[_dpred_key]
 
     # Load offensive stats for this defenseman
-    _d_off_stats, _d_off_err = load_defensive_offensive_stats() if def_models_loaded else ({}, None)
+    _d_off_stats, _d_off_df, _d_off_err = load_defensive_offensive_stats() if def_models_loaded else ({}, None, None)
     _pid_off = _d_off_stats.get(pred["pid"], {}) if pred else {}
 
     def_t1, def_t2, def_t3 = st.tabs(["Team Fit", "Next Season", "Pairing"])
@@ -316,41 +336,79 @@ with tab_def:
                            else dpred["fit_results"].iloc[0].to_dict()
             # Classify using career profile (actual stats), not team-adjusted predictions
             _profile_dict = dict(def_player_profiles[pred["pid"]][0]) if pred["pid"] in def_player_profiles else _sample_preds
-            _d_type, _d_desc = classify_defenseman_type(_profile_dict)
-            _def_grade, _def_score, _def_desc = grade_defensive_defenseman(_sample_preds)
-            _off_grade, _off_score, _off_desc = grade_offensive_defenseman(_pid_off) if _pid_off else ("—", 0, "")
+            _def_grade, _def_score, _def_desc, _def_breakdown = grade_defensive_defenseman(_sample_preds, season_def_df=def_df)
+            _off_grade, _off_score, _off_desc, _off_breakdown = grade_offensive_defenseman(_pid_off, season_off_df=_d_off_df) if _pid_off else ("—", 0, "", {})
+            _d_type, _d_desc = classify_defenseman_type(_profile_dict, def_score=_def_score, off_score=_off_score)
 
             st.subheader(f"{dpred['matched']}  —  {_d_type}  |  {dpred['actual_team']}  |  Seasons: {seasons_str}")
             st.caption(_d_desc)
 
             # Grade display
+            def _score_to_grade(s):
+                if s >= 90: return "A"
+                if s >= 75: return "B+"
+                if s >= 50: return "B"
+                if s >= 35: return "C+"
+                if s >= 20: return "C"
+                return "D"
+            _combined_num = _def_score * 0.5 + _off_score * 0.5
+
             if _d_type == "Two-Way D":
                 gc1, gc2, gc3 = st.columns(3)
-                def _score_to_grade(s):
-                    if s >= 85: return "A"
-                    if s >= 70: return "B+"
-                    if s >= 55: return "B"
-                    if s >= 38: return "C+"
-                    if s >= 20: return "C"
-                    return "D"
-                _combined_num = _def_score * 0.5 + _off_score * 0.5
-                gc1.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
-                gc2.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
-                gc3.metric("Combined Grade", _score_to_grade(_combined_num), f"Score: {_combined_num:.0f}/100")
+                gc1.metric("Defensive Grade", _def_grade, f"Top {100-_def_score:.0f}%")
+                gc2.metric("Offensive Grade", _off_grade, f"Top {100-_off_score:.0f}%")
+                gc3.metric("Combined Grade", _score_to_grade(_combined_num), f"Top {100-_combined_num:.0f}%")
             elif _d_type == "Offensive D":
-                gc1, gc2 = st.columns(2)
-                gc1.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
-                gc2.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
-                if _off_desc:
-                    st.caption(f"Offense: {_off_desc}")
-            else:
-                gc1, gc2 = st.columns(2)
-                gc1.metric("Defensive Grade", _def_grade, f"Score: {_def_score:.0f}/100")
-                if _pid_off:
-                    gc2.metric("Offensive Grade", _off_grade, f"Score: {_off_score:.0f}/100")
-                st.caption(_def_desc)
+                gc1, gc2, gc3 = st.columns(3)
+                gc1.metric("Offensive Grade", _off_grade, f"Top {100-_off_score:.0f}%")
+                gc2.metric("Defensive Grade", _def_grade, f"Top {100-_def_score:.0f}%")
+                gc3.metric("Combined Grade", _score_to_grade(_combined_num), f"Top {100-_combined_num:.0f}%")
+            else:  # Defensive D
+                gc1, gc2, gc3 = st.columns(3)
+                gc1.metric("Defensive Grade", _def_grade, f"Top {100-_def_score:.0f}%")
+                gc2.metric("Offensive Grade", _off_grade if _pid_off else "—", f"Top {100-_off_score:.0f}%" if _pid_off else "")
+                gc3.metric("Combined Grade", _score_to_grade(_combined_num), f"Top {100-_combined_num:.0f}%")
 
-            st.caption("Defensive Score: xGA suppression 30%, takeaways 20%, PK usage 20%, hits 15%, discipline 15%.")
+            # ── Per-category percentile breakdown ─────────────────────────────
+            st.markdown("#### Category Breakdown")
+
+            def _pct_bar(label, val, pct, lower_is_better=False):
+                # For lower-is-better stats, a high percentile = elite suppression
+                # so colors stay the same (high pct = gold), but we show the raw
+                # value context differently so it reads naturally
+                color = (
+                    "#FFD700" if pct >= 90 else
+                    "#4a90d9" if pct >= 75 else
+                    "#57a85a" if pct >= 50 else
+                    "#e8a838" if pct >= 35 else
+                    "#c8102e"
+                )
+                arrow = "↓ lower is better" if lower_is_better else ""
+                # For lower-is-better, show "Top X%" framing so p10 xGA reads as elite
+                if lower_is_better:
+                    pct_label = f"Top {100 - pct:.0f}%" if pct <= 90 else "Elite"
+                else:
+                    pct_label = f"{pct:.0f}th%"
+                st.markdown(
+                    f"**{label}** &nbsp; `{val}` &nbsp; — &nbsp; "
+                    f"<span style='color:{color}'>**{pct_label}**</span> "
+                    f"<span style='color:#888;font-size:0.8em'>{arrow}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.progress(int(pct))
+
+            lower_is_better_cats = {"xGA/60 (5v5)", "PIM/GP"}
+
+            # Defensive breakdown — always shown
+            st.markdown("**Defensive**")
+            for cat, (val, pct) in _def_breakdown.items():
+                _pct_bar(cat, val, pct, lower_is_better=(cat in lower_is_better_cats))
+
+            # Offensive breakdown — always shown when data available
+            if _pid_off and _off_breakdown:
+                st.markdown("**Offensive**")
+                for cat, (val, pct) in _off_breakdown.items():
+                    _pct_bar(cat, val, pct)
             st.markdown("#### Rankings Table")
             display = def_show_results_table(dpred["fit_results"], dpred["actual_team"])
             csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
@@ -390,11 +448,19 @@ with tab_def:
                 def_fetch_team_roster_d.clear()
                 fetch_actual_pairs.clear()
 
-            with st.spinner(f"Fetching {pair_team} shifts and building pairings..."):
+            n_games = st.slider(
+                "Games to include in pairing data",
+                min_value=10, max_value=82, value=25, step=5,
+                help="More games = more stable pairs but slower load. 25 games reflects recent pairings well.",
+                key="pair_games_slider"
+            )
+
+            with st.spinner(f"Fetching {pair_team} shifts ({n_games} games) and building pairings..."):
                 pair_result = def_build_pairing_insertion(
                     dpred["pid"], pair_team, def_df, def_team_ctx,
                     def_fit_models, def_player_profiles, def_has_age,
-                    feature_names=def_fit_feature_names
+                    feature_names=def_fit_feature_names,
+                    n_games=n_games
                 )
 
             if isinstance(pair_result, tuple) and len(pair_result) == 6:
@@ -531,7 +597,6 @@ with tab_def:
                                 "Hits/GP":   round(info.get("ind_hits_pg", 0), 2),
                                 "TK/GP":     round(info.get("ind_takeaways_pg", 0), 3),
                                 "xGA/60":    round(info.get("xg_against_per60_5v5", 0), 3),
-                                "PK%":       round(info.get("pk_ice_pct", 0) * 100, 1),
                                 "PIM/GP":    round(info.get("pim_pg", 0), 2),
                                 "Is New Player": info.get("is_searched_player", False),
                             })
@@ -618,7 +683,7 @@ with tab_contract:
         cba_cols[0].metric("Signing Type",    signing_type)
         cba_cols[1].metric("CBA Max Length",  f"{cba['max_years']} years")
         cba_cols[2].metric("Recommended Max", f"{cba['recommended']} years")
-        cba_cols[3].metric("Age at Expiry",   f"{cba['age_at_expiry']:.0f}")
+        cba_cols[3].metric("Age at Expiry",   f"{curr_age + n_years:.0f}")
 
         # 35+ rule warning
         if cba["is_35_signing"]:
@@ -650,7 +715,8 @@ with tab_contract:
                 def_player_profiles if def_models_loaded else {},
                 def_has_age if def_models_loaded else False,
                 contract_team, n_years,
-                def_fit_feature_names=def_fit_feature_names if def_models_loaded else None
+                def_fit_feature_names=def_fit_feature_names if def_models_loaded else None,
+                curr_age=curr_age
             )
 
         if proj_err:
@@ -673,22 +739,22 @@ with tab_contract:
 
             if is_d_contract:
                 proj_df = pd.DataFrame([{
-                    "Year":          f"Year {r['year']} (Age {r['age']:.0f})",
-                    "Hits/GP":       r["hits_pg"],
-                    "Takeaways/GP":  r["takeaways_pg"],
-                    "xGA/60 (5v5)":  r["goals_against_pg"],
-                    "PK%":           f"{r['pk_pct']*100:.1f}%",
-                    "PIM/GP":        r["pim_pg"],
-                    "Def Score":     r["def_score"],
-                    "Confidence":    f"{r['confidence']*100:.0f}%",
+                    "Year":           f"Year {r['year']} (Age {r['age']:.0f})",
+                    "Hits/GP":        r["hits_pg"],
+                    "Takeaways/GP":   r["takeaways_pg"],
+                    "xGA/60 (5v5)":   r["goals_against_pg"],
+                    "PIM/GP":         r["pim_pg"],
+                    "Def %ile":       f"Top {100 - r['def_score']:.0f}%" if r['def_score'] > 10 else "Elite",
+                    "Off %ile":       f"Top {100 - r['off_score']:.0f}%" if r['off_score'] > 10 else "Elite",
+                    "Confidence":     f"{r['confidence']*100:.0f}%",
                 } for r in proj_rows])
             else:
                 proj_df = pd.DataFrame([{
-                    "Year":         f"Year {r['year']} (Age {r['age']:.0f})",
-                    "Points/GP":    r["points_pg"],
-                    "Goals/GP":     r["goals_pg"],
-                    "Game Score/GP":r["gs_pg"],
-                    "Confidence":   f"{r['confidence']*100:.0f}%",
+                    "Year":       f"Year {r['year']} (Age {r['age']:.0f})",
+                    "Points/GP":  r["points_pg"],
+                    "Goals/GP":   r["goals_pg"],
+                    "Pts %ile":   f"Top {100 - r['pts_pct']:.0f}%" if r.get('pts_pct', 50) > 10 else "Elite",
+                    "Confidence": f"{r['confidence']*100:.0f}%",
                 } for r in proj_rows])
 
             st.dataframe(proj_df, use_container_width=True, hide_index=True)
@@ -704,22 +770,24 @@ with tab_contract:
 
             if is_d_contract:
                 vals   = [r["def_score"] for r in proj_rows]
-                ylabel = "Defensive Score (0-100)"
+                ylabel = "Defensive Percentile"
                 color  = "#4a90d9"
             else:
-                vals   = [r["points_pg"] for r in proj_rows]
-                ylabel = "Points / Game"
+                vals   = [r.get("pts_pct", 50) for r in proj_rows]
+                ylabel = "Points Percentile"
                 color  = "#4a90d9"
 
             confs = [r["confidence"] for r in proj_rows]
 
             # Plot line with confidence band
             ax_c.plot(years, vals, color=color, linewidth=2.5, marker="o", markersize=8, zorder=3)
-            # Confidence band — widen with lower confidence
-            spread = [v * (1 - c) * 0.5 for v, c in zip(vals, confs)]
-            ax_c.fill_between(years,
-                              [v - s for v, s in zip(vals, spread)],
-                              [v + s for v, s in zip(vals, spread)],
+            # Asymmetric confidence band — uncertainty is mostly downside risk.
+            # A player is unlikely to dramatically improve late in a contract,
+            # but could decline. Upside = 25% of spread, downside = 75%.
+            spread = [v * (1 - c) * 0.4 for v, c in zip(vals, confs)]
+            upper  = [v + s * 0.25 for v, s in zip(vals, spread)]
+            lower  = [max(v - s * 0.75, 0) for v, s in zip(vals, spread)]
+            ax_c.fill_between(years, lower, upper,
                               alpha=0.2, color=color, label="Confidence range")
             ax_c.set_xticks(years)
             ax_c.set_xticklabels(labels, color="white", fontsize=9)
@@ -742,11 +810,10 @@ with tab_contract:
                 y1_score    = yr1["def_score"]
                 yn_score    = yr_last["def_score"]
                 decline     = max(y1_score - yn_score, 0)
-                decline_pct = max((y1_score - yn_score) / max(y1_score, 1) * 100, 0)
                 st.markdown(
-                    f"- **Year 1 Defensive Score:** {y1_score:.1f} / 100  \n"
-                    f"- **Year {n_years} Defensive Score:** {yn_score:.1f} / 100  \n"
-                    f"- **Projected decline:** {decline:.1f} pts ({decline_pct:.0f}%)  \n"
+                    f"- **Year 1 Defensive Percentile:** {y1_score:.0f}th% among all D-men  \n"
+                    f"- **Year {n_years} Defensive Percentile:** {yn_score:.0f}th%  \n"
+                    f"- **Projected percentile drop:** {decline:.0f} points  \n"
                     f"- **Risk rating:** {risk_label}"
                 )
             else:
@@ -931,44 +998,38 @@ with tab_val:
                 else:
                     st.markdown(f"**{len(def_val_df):,} defensemen matched**")
 
-                    has_pk  = "actual_pk_pct" in def_val_df.columns and def_val_df["actual_pk_pct"].sum() > 0
                     has_pim = "actual_pim_pg" in def_val_df.columns and def_val_df["actual_pim_pg"].sum() > 0
+                    has_xga = "actual_xga_per60" in def_val_df.columns and def_val_df["actual_xga_per60"].sum() > 0
 
-                    metric_cols = st.columns(5)
+                    metric_cols = st.columns(4)
                     metric_cols[0].metric("Hits/GP MAE",
                               f"{mean_absolute_error(def_val_df['actual_hits_pg'], def_val_df['pred_hits_pg']):.3f}")
                     metric_cols[1].metric("Takeaways/GP MAE",
                               f"{mean_absolute_error(def_val_df['actual_tk_pg'], def_val_df['pred_tk_pg']):.3f}")
-                    if has_pk:
-                        metric_cols[2].metric("PK% MAE",
-                                  f"{mean_absolute_error(def_val_df['actual_pk_pct'], def_val_df['pred_pk_pct']):.4f}")
                     if has_pim:
-                        metric_cols[3].metric("PIM/GP MAE",
+                        metric_cols[2].metric("PIM/GP MAE",
                                   f"{mean_absolute_error(def_val_df['actual_pim_pg'], def_val_df['pred_pim_pg']):.3f}")
-                    metric_cols[4].metric("Defensemen matched", f"{len(def_val_df):,}")
+                    metric_cols[3].metric("Defensemen matched", f"{len(def_val_df):,}")
                     st.caption("PIM/GP: actual = penaltyMinutes/GP from NHL API, predicted = ind_penalty_minutes_pg from MoneyPuck.")
 
-                    # Always show 2x2 grid — all 4 metrics
+                    # 2x2 grid — hits, takeaways, xGA, PIM
                     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
                     fig.patch.set_facecolor("#0e1117")
                     make_scatter(def_val_df, "actual_hits_pg", "pred_hits_pg", "Hits / Game",      axes[0][0])
                     make_scatter(def_val_df, "actual_tk_pg",   "pred_tk_pg",   "Takeaways / Game", axes[0][1])
-                    if has_pk:
-                        make_scatter(def_val_df, "actual_pk_pct", "pred_pk_pct", "PK Ice %",   axes[1][0])
+                    if has_pim:
+                        make_scatter(def_val_df, "actual_pim_pg", "pred_pim_pg", "PIM / Game", axes[1][0])
                     else:
                         axes[1][0].set_facecolor("#0e1117")
-                        axes[1][0].text(0.5, 0.5, "PK% data not available\nfrom NHL API",
+                        axes[1][0].text(0.5, 0.5, "PIM data not available\nfrom NHL API",
                                         ha="center", va="center", color="white", fontsize=12,
                                         transform=axes[1][0].transAxes)
-                        axes[1][0].set_title("PK Ice %", color="white")
-                    if has_pim:
-                        make_scatter(def_val_df, "actual_pim_pg", "pred_pim_pg", "PIM / Game", axes[1][1])
-                    else:
-                        axes[1][1].set_facecolor("#0e1117")
-                        axes[1][1].text(0.5, 0.5, "PIM data not available\nfrom NHL API",
-                                        ha="center", va="center", color="white", fontsize=12,
-                                        transform=axes[1][1].transAxes)
-                        axes[1][1].set_title("PIM / Game", color="white")
+                        axes[1][0].set_title("PIM / Game", color="white")
+                    axes[1][1].set_facecolor("#0e1117")
+                    axes[1][1].text(0.5, 0.5, "xGA validation requires\nMoneyPuck current season data",
+                                    ha="center", va="center", color="white", fontsize=12,
+                                    transform=axes[1][1].transAxes)
+                    axes[1][1].set_title("xGA Against / 60", color="white")
                     plt.tight_layout()
                     st.pyplot(fig)
                     plt.close()
@@ -978,7 +1039,6 @@ with tab_val:
                     miss_cols = ["player_name","team","games_played",
                                  "actual_hits_pg","pred_hits_pg","hits_error",
                                  "actual_tk_pg","pred_tk_pg","tk_error",
-                                 "actual_pk_pct","pred_pk_pct",
                                  "actual_pim_pg","pred_pim_pg","seasons_used"]
                     misses = def_val_df.reindex(def_val_df["hits_error"].abs().nlargest(15).index)[
                         [c for c in miss_cols if c in def_val_df.columns]]

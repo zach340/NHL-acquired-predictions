@@ -1606,12 +1606,13 @@ def show_defensive_profile(player_id, player_name, def_df):
 def load_defensive_offensive_stats():
     """
     Load offensive stats for defensemen from season_dataset.csv.
-    Returns dict: player_id -> {points_pg, goals_pg, game_score_pg, pp_pct, season}
+    Returns:
+      - dict: player_id -> {points_pg, goals_pg, game_score_pg, pp_pct, season}
+      - DataFrame: all D-men rows (most recent season per player) for live percentile ranking
     """
     try:
         df = pd.read_csv(OFF_FILE)
         df = df[df["position"] == "D"].copy()
-        # Get most recent season for each player
         df = df.sort_values("season", ascending=False)
         df = df.groupby("player_id").first().reset_index()
         result = {}
@@ -1623,71 +1624,162 @@ def load_defensive_offensive_stats():
                 "pp_icetime_pct": float(row.get("pp_icetime_pct",   0) or 0),
                 "season":         int(row.get("season", 2024)),
             }
-        return result, None
+        return result, df, None
     except Exception as e:
-        return {}, str(e)
+        return {}, None, str(e)
 
 
 def grade_offensive_defenseman(off_stats, season_off_df=None):
     """
-    Grade a defenseman's offensive production on A-F scale
-    relative to 2024 D-man percentiles:
-      pts/gp: p25=0.14, p50=0.24, p75=0.36, p90=0.56, max=1.15
-      gs/gp:  p25=0.11, p50=0.26, p75=0.43, p90=0.69, max=1.50
+    Grade a defenseman's offensive production on A-F scale using
+    live percentile rank among all D-men in the dataset.
+    Weighted 70% points/GP + 30% goals/GP.
+
+    Grade cutoffs (percentile among all D-men):
+      A   = top 10%  (p90+)
+      B+  = top 25%  (p75–90)
+      B   = top 50%  (p50–75)
+      C+  = top 65%  (p35–50)
+      C   = top 80%  (p20–35)
+      D   = bottom 20% (below p20)
     """
-    pts = off_stats.get("points_pg", 0)
-    gs  = off_stats.get("game_score_pg", 0)
+    pts   = off_stats.get("points_pg", 0)
+    goals = off_stats.get("goals_pg",  0)
 
-    # Score 0-100 based on percentile thresholds
-    def pct_score(val, p25, p50, p75, p90, p_max):
-        if val >= p_max * 0.85: return 95
-        if val >= p90:          return 85
-        if val >= p75:          return 70
-        if val >= p50:          return 55
-        if val >= p25:          return 38
-        return max(0, val / p25 * 30)
+    if season_off_df is not None and len(season_off_df) > 10:
+        pts_col   = "points_per_game"  if "points_per_game"  in season_off_df.columns else None
+        goals_col = "goals_per_game"   if "goals_per_game"   in season_off_df.columns else None
 
-    pts_score = pct_score(pts, 0.14, 0.24, 0.36, 0.56, 1.15)
-    gs_score  = pct_score(gs,  0.11, 0.26, 0.43, 0.69, 1.50)
-    score = pts_score * 0.6 + gs_score * 0.4
+        def percentile_rank(val, col):
+            if col is None:
+                return 50.0
+            vals = season_off_df[col].dropna()
+            if len(vals) == 0:
+                return 50.0
+            return float((vals < val).mean() * 100)
 
-    if score >= 85: grade, desc = "A",  "Elite offensive D-man — top 10% in the league"
-    elif score >= 70: grade, desc = "B+", "Above average offensively — strong contributor"
-    elif score >= 55: grade, desc = "B",  "Solid offensive production — above median"
-    elif score >= 38: grade, desc = "C+", "Average offensive output for a defenseman"
-    elif score >= 20: grade, desc = "C",  "Below average offensively"
-    else:             grade, desc = "D",  "Minimal offensive contribution"
+        pts_pct   = percentile_rank(pts,   pts_col)
+        goals_pct = percentile_rank(goals, goals_col)
+    else:
+        # Fallback: estimate percentile from 2024 D-man distribution
+        # pts/gp:   p20=0.10, p35=0.17, p50=0.24, p75=0.36, p90=0.56
+        # goals/gp: p20=0.03, p35=0.06, p50=0.08, p75=0.13, p90=0.20
+        def estimate_pct(val, breakpoints):
+            # breakpoints: list of (value, percentile) pairs
+            for i in range(len(breakpoints) - 1):
+                v0, p0 = breakpoints[i]
+                v1, p1 = breakpoints[i + 1]
+                if v0 <= val <= v1:
+                    return p0 + (val - v0) / (v1 - v0) * (p1 - p0)
+            if val < breakpoints[0][0]:
+                return 0.0
+            return 99.0
 
-    return grade, round(score, 1), desc
+        pts_pct   = estimate_pct(pts,   [(0.10, 20), (0.17, 35), (0.24, 50), (0.36, 75), (0.56, 90), (1.15, 99)])
+        goals_pct = estimate_pct(goals, [(0.03, 20), (0.06, 35), (0.08, 50), (0.13, 75), (0.20, 90), (0.40, 99)])
+
+    # Composite percentile — 70% points, 30% goals
+    composite_pct = pts_pct * 0.70 + goals_pct * 0.30
+
+    if composite_pct >= 90:
+        grade, desc = "A",  "Elite offensive D-man — top 10% in the league"
+    elif composite_pct >= 75:
+        grade, desc = "B+", "Above average offensively — top 25%"
+    elif composite_pct >= 50:
+        grade, desc = "B",  "Solid offensive production — above median"
+    elif composite_pct >= 35:
+        grade, desc = "C+", "Average offensive output for a defenseman"
+    elif composite_pct >= 20:
+        grade, desc = "C",  "Below average offensively — bottom third"
+    else:
+        grade, desc = "D",  "Minimal offensive contribution — bottom 20%"
+
+    breakdown = {
+        "Points/GP":  (round(pts,   3), round(pts_pct,   1)),
+        "Goals/GP":   (round(goals, 3), round(goals_pct, 1)),
+    }
+
+    return grade, round(composite_pct, 1), desc, breakdown
 
 
-def grade_defensive_defenseman(def_stats):
+def grade_defensive_defenseman(def_stats, season_def_df=None):
     """
-    Grade a defenseman's defensive production on A-F scale.
-    Returns (grade, score_0_100, description).
+    Grade a defenseman's defensive production on A-F scale using
+    live percentile rank among all D-men in the dataset.
+
+    Metrics and weights:
+      xGA/60 (5v5)    — 40%  (lower is better)
+      Takeaways/GP    — 25%
+      Hits/GP         — 20%
+      PIM/GP          — 15%  (lower is better)
+
+    Grade cutoffs (percentile among all D-men):
+      A   = top 10%  (p90+)
+      B+  = top 25%  (p75–90)
+      B   = top 50%  (p50–75)
+      C+  = top 65%  (p35–50)
+      C   = top 80%  (p20–35)
+      D   = bottom 20%
+
+    Returns (grade, composite_percentile, description, breakdown_dict)
     """
-    hits  = def_stats.get("ind_hits_pg",        0)
-    tka   = def_stats.get("ind_takeaways_pg",   0)
-    xga   = def_stats.get("xg_against_per60_5v5", 2.5)
-    pk    = def_stats.get("pk_ice_pct",         0)
-    pim   = def_stats.get("pim_pg",             0)
+    hits = def_stats.get("ind_hits_pg",          0)
+    tka  = def_stats.get("ind_takeaways_pg",     0)
+    xga  = def_stats.get("xg_against_per60_5v5", 2.5)
+    pim  = def_stats.get("pim_pg",               0)
 
-    # Normalize each metric relative to league D-man ranges
-    score = 0
-    score += 25 * min(tka / 0.50, 1.0)                        # takeaways — elite = 0.50/gp
-    score += 30 * max(0, (3.5 - xga) / (3.5 - 1.8))          # xGA suppression
-    score += 20 * min(pk  / 0.18,  1.0)                       # PK deployment
-    score += 15 * min(hits / 3.0,  1.0)                       # physicality
-    score += 10 * max(0, 1 - pim / 1.2)                       # discipline (low PIM = good)
+    def percentile_rank(val, col, lower_is_better=False):
+        if season_def_df is not None and col in season_def_df.columns:
+            vals = season_def_df[col].dropna()
+            if len(vals) > 10:
+                if lower_is_better:
+                    return float((vals > val).mean() * 100)
+                return float((vals < val).mean() * 100)
+        # Fallback: estimate from hardcoded 2024 D-man breakpoints
+        breakpoints = {
+            "ind_hits_pg":           [(0.3, 10), (0.7, 25), (1.1, 50), (1.8, 75), (2.5, 90), (4.0, 99)],
+            "ind_takeaways_pg":      [(0.10, 10), (0.18, 25), (0.28, 50), (0.40, 75), (0.52, 90), (0.70, 99)],
+            "xg_against_per60_5v5":  [(1.8, 99), (2.2, 90), (2.6, 75), (3.0, 50), (3.3, 25), (3.8, 10)],
+            "pim_pg":                [(0.1, 99), (0.2, 90), (0.35, 75), (0.5, 50), (0.7, 25), (1.2, 10)],
+        }
+        pts = breakpoints.get(col, [])
+        if not pts:
+            return 50.0
+        for i in range(len(pts) - 1):
+            v0, p0 = pts[i]
+            v1, p1 = pts[i + 1]
+            if min(v0, v1) <= val <= max(v0, v1):
+                return p0 + (val - v0) / (v1 - v0) * (p1 - p0)
+        return 99.0 if val > pts[-1][0] else 0.0
 
-    if score >= 80: grade, desc = "A",  "Elite defensive D-man"
-    elif score >= 65: grade, desc = "B+", "Above average defensively"
-    elif score >= 50: grade, desc = "B",  "Solid defensive contributor"
-    elif score >= 35: grade, desc = "C+", "Average defensive production"
-    elif score >= 20: grade, desc = "C",  "Below average defensively"
-    else:             grade, desc = "D",  "Minimal defensive contribution"
+    hits_pct = percentile_rank(hits, "ind_hits_pg")
+    tka_pct  = percentile_rank(tka,  "ind_takeaways_pg")
+    xga_pct  = percentile_rank(xga,  "xg_against_per60_5v5", lower_is_better=True)
+    pim_pct  = percentile_rank(pim,  "pim_pg",               lower_is_better=True)
 
-    return grade, round(score, 1), desc
+    composite_pct = (xga_pct * 0.30 + tka_pct * 0.25 + hits_pct * 0.25 + pim_pct * 0.20)
+
+    if composite_pct >= 90:
+        grade, desc = "A",  "Elite defensive D-man — top 10% in the league"
+    elif composite_pct >= 75:
+        grade, desc = "B+", "Above average defensively — top 25%"
+    elif composite_pct >= 50:
+        grade, desc = "B",  "Solid defensive contributor — above median"
+    elif composite_pct >= 35:
+        grade, desc = "C+", "Average defensive production"
+    elif composite_pct >= 20:
+        grade, desc = "C",  "Below average defensively — bottom third"
+    else:
+        grade, desc = "D",  "Minimal defensive contribution — bottom 20%"
+
+    breakdown = {
+        "xGA/60 (5v5)":  (round(xga,  2), round(xga_pct,  1)),
+        "Takeaways/GP":  (round(tka,  3), round(tka_pct,  1)),
+        "Hits/GP":       (round(hits, 2), round(hits_pct, 1)),
+        "PIM/GP":        (round(pim,  2), round(pim_pct,  1)),
+    }
+
+    return grade, round(composite_pct, 1), desc, breakdown
 
 
 # ── Defensive model config ────────────────────────────────────────────────────
@@ -1724,10 +1816,10 @@ DEF_LOWER_IS_BETTER = {"xg_against_per60_5v5", "pim_pg"}
 
 # Defensive score weights (used for pairing)
 DEF_SCORE_WEIGHTS = {
-    "ind_hits_pg":           0.15,
-    "ind_takeaways_pg":      0.25,  # up from 0.20
-    "xg_against_per60_5v5": 0.40,  # up from 0.30 — most important
-    "pim_pg":                0.20,  # up from 0.15
+    "ind_hits_pg":           0.25,
+    "ind_takeaways_pg":      0.25,
+    "xg_against_per60_5v5": 0.30,
+    "pim_pg":                0.20,
 }
 
 # Pairing slot definitions
@@ -2168,77 +2260,45 @@ def def_build_all_team_predictions(profile, all_teams, models, has_age,
     return pd.DataFrame(rows)
 
 
-def classify_defenseman_type(scores):
+def classify_defenseman_type(scores, def_score=None, off_score=None,
+                             season_def_df=None, season_off_df=None):
     """
-    Classify a defenseman into one of three types:
-      Offensive D  — focused on generating offense; exceptional skating and
-                     puck-handling but may leave team vulnerable defensively
-      Defensive D  — focused on stopping the opposition; physical, blocks shots,
-                     clears pucks, but may struggle generating offense
-      Two-Way D    — well-rounded, contributes to both ends; versatile but may
-                     not excel as much as specialized counterparts
+    Classify a defenseman into Offensive D, Defensive D, or Two-Way D
+    using the gap between their defensive and offensive percentile scores.
+
+    If pre-computed scores are not passed in, they are computed here.
+
+    Classification rules (based on percentile gap):
+      |off - def| <= 20  →  Two-Way D   (balanced)
+      off - def  >  20   →  Offensive D (offense dominates)
+      def - off  >  20   →  Defensive D (defense dominates)
     """
-    hits   = scores.get("ind_hits_pg", 0)
-    xga    = scores.get("xg_against_per60_5v5", 2.5)
-    pk_pct = scores.get("pk_ice_pct", 0.07)
-    tka    = scores.get("ind_takeaways_pg", 0)
+    if def_score is None:
+        _, def_score, _, _ = grade_defensive_defenseman(scores, season_def_df)
+    if off_score is None:
+        off_stats = {
+            "points_pg": scores.get("points_per_game", scores.get("points_pg", 0)),
+            "goals_pg":  scores.get("goals_per_game",  scores.get("goals_pg",  0)),
+        }
+        _, off_score, _, _ = grade_offensive_defenseman(off_stats, season_off_df)
 
-    # Offensive D: low physicality, low PK usage, good suppression (reads plays)
-    # Defensive D: high physicality, high PK, high suppression
-    # Two-Way D:   mixed — neither extreme
+    gap = off_score - def_score
 
-def classify_defenseman_type(scores):
-    """
-    Classify a defenseman into one of three types by scoring them
-    on both offensive and defensive dimensions independently.
-
-    Offensive signals: low hits, low PIM, high takeaways (transition play)
-    Defensive signals: high hits, high PIM, heavy PK usage
-
-    A player who scores high on BOTH = Two-Way D
-    A player who scores high on defensive only = Defensive D
-    A player who scores low on both physical dimensions = Offensive D
-    """
-    hits   = scores.get("ind_hits_pg",       1.1)
-    pk_pct = scores.get("pk_ice_pct",        0.07)
-    tka    = scores.get("ind_takeaways_pg",  0.31)
-    pim    = scores.get("pim_pg",            0.45)
-
-    # Score each dimension relative to league averages
-    # Defensive dimension: physicality + PK deployment
-    def_points = 0
-    def_points += 2 if hits   >= 2.0  else (1 if hits   >= 1.5  else 0)
-    def_points += 2 if pk_pct >= 0.12 else (1 if pk_pct >= 0.09  else 0)
-    def_points += 1 if pim    >= 0.6  else 0
-
-    # Offensive dimension: puck skills, transition, reading the game
-    # Low hits = skater not a banger, high takeaways = active in transition
-    off_points = 0
-    off_points += 2 if hits   <= 0.7  else (1 if hits   <= 1.0  else 0)
-    off_points += 2 if tka    >= 0.40 else (1 if tka    >= 0.33  else 0)
-    off_points += 1 if pk_pct <= 0.05 else 0   # rarely deployed on PK = more offensive role
-
-    # Classify based on balance
-    if def_points >= 2 and off_points >= 2:
-        return "Two-Way D", (
-            "Two-way defenceman — well-rounded with contributions at both ends. "
-            "Versatile and reliable in any situation."
-        )
-    if def_points >= 3:
-        return "Defensive D", (
-            "Defensive defenceman — physical, blocks shots, clears the zone. "
-            "Strong defensively but may struggle generating offense."
-        )
-    if off_points >= 3:
+    if gap > 30:
         return "Offensive D", (
             "Offensive defenceman — exceptional skating and puck-handling, "
             "creates scoring opportunities but may be vulnerable defensively."
         )
-    # Middle ground — lean toward two-way
-    return "Two-Way D", (
-        "Two-way defenceman — well-rounded with contributions at both ends. "
-        "Versatile and reliable in any situation."
-    )
+    elif gap < -30:
+        return "Defensive D", (
+            "Defensive defenceman — physical, blocks shots, clears the zone. "
+            "Strong defensively but may struggle generating offense."
+        )
+    else:
+        return "Two-Way D", (
+            "Two-way defenceman — well-rounded with contributions at both ends. "
+            "Versatile and reliable in any situation."
+        )
 
 
 def def_compute_defensive_score(df_preds, season_df=None):
@@ -2291,7 +2351,8 @@ def def_compute_defensive_score(df_preds, season_df=None):
 
 def def_predict_defenseman(player_name, df, team_ctx, fit_models, next_models,
                         player_profiles, has_age,
-                        fit_feature_names=None, next_feature_names=None):
+                        fit_feature_names=None, next_feature_names=None,
+                        season_df=None):
     """Main prediction entry point."""
     mask = df["player_name"].str.lower() == player_name.strip().lower()
     rows = df[mask]
@@ -2311,7 +2372,7 @@ def def_predict_defenseman(player_name, df, team_ctx, fit_models, next_models,
     # Current fit predictions
     fit_results  = def_build_all_team_predictions(profile, all_teams, fit_models, has_age,
                                                     feature_names=fit_feature_names)
-    fit_results  = def_compute_defensive_score(fit_results)
+    fit_results  = def_compute_defensive_score(fit_results, season_df=season_df)
     fit_results  = fit_results.sort_values("defensive_score", ascending=False).reset_index(drop=True)
     fit_results.index += 1
     fit_results["is_actual"] = fit_results["player_team"] == actual_team
@@ -2319,7 +2380,7 @@ def def_predict_defenseman(player_name, df, team_ctx, fit_models, next_models,
     # Next season predictions
     next_results = def_build_all_team_predictions(profile, all_teams, next_models, has_age,
                                                      use_traj=True, feature_names=next_feature_names)
-    next_results = def_compute_defensive_score(next_results)
+    next_results = def_compute_defensive_score(next_results, season_df=season_df)
     next_results = next_results.sort_values("defensive_score", ascending=False).reset_index(drop=True)
     next_results.index += 1
     next_results["is_actual"] = next_results["player_team"] == actual_team
@@ -2359,10 +2420,10 @@ def def_fetch_team_roster_d(team_code):
 
 
 @st.cache_data(ttl=21600, show_spinner=False)   # 6-hour TTL — season data barely changes
-def fetch_actual_pairs(team_code, d_pids=None):
+def fetch_actual_pairs(team_code, d_pids=None, n_games=25):
     """
-    Fetch actual D-pair combinations from NHL shift chart data for the full
-    current season (not just the last 10 games).
+    Fetch actual D-pair combinations from NHL shift chart data.
+    n_games: how many of the most recent games to include (default 25).
     d_pids: frozenset of defenseman player IDs to filter shifts.
     Returns a list of (pid1, pid2, shared_seconds) sorted by shared TOI desc.
     """
@@ -2384,11 +2445,12 @@ def fetch_actual_pairs(team_code, d_pids=None):
             and g.get("gameState") not in ("FUT", "PRE", "PREVIEW")  # already played
         ]
         finished = sorted(finished, key=lambda g: g.get("gameDate", ""), reverse=True)
+        finished = finished[:n_games]   # ← cap to n most recent games
 
         if not finished:
             return [], "No finished regular-season games found for this team."
 
-        # Build shared TOI matrix from shifts across ALL season games
+        # Build shared TOI matrix from shifts across selected games
         pair_toi = defaultdict(int)  # (pid1, pid2) -> shared seconds
         errors   = []
         games_processed = 0
@@ -2472,7 +2534,7 @@ def fetch_actual_pairs(team_code, d_pids=None):
 
 def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
                                     fit_models, player_profiles, has_age,
-                                    feature_names=None):
+                                    feature_names=None, n_games=25):
     """
     Build pairing view using ACTUAL NHL pair combinations from shift data.
     Shows the real current pairs with model defensive scores, then inserts
@@ -2513,20 +2575,16 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     # 2. Get model predictions for every rostered D-man
     player_scores = {}  # pid -> {metric: val, defensive_score: val, player_name: str}
     # Load offensive stats for grading
-    d_off_stats, _ = load_defensive_offensive_stats()
+    d_off_stats, d_off_df, _ = load_defensive_offensive_stats()
 
-    def _combined_score(pid, def_score, d_type):
-        """
-        Compute a combined player score that incorporates offensive grade
-        for Two-Way D and Offensive D, weighted by type.
-        """
-        _, off_score, _ = grade_offensive_defenseman(d_off_stats.get(pid, {}))
+    def _combined_score(def_pct, off_pct, d_type):
+        """Blend defensive and offensive percentile scores by player type."""
         if d_type == "Two-Way D":
-            return round(def_score * 0.5 + off_score * 0.5, 1)
+            return round(def_pct * 0.5 + off_pct * 0.5, 1)
         elif d_type == "Offensive D":
-            return round(def_score * 0.3 + off_score * 0.7, 1)
+            return round(def_pct * 0.3 + off_pct * 0.7, 1)
         else:  # Defensive D
-            return round(def_score * 0.8 + off_score * 0.2, 1)
+            return round(def_pct * 0.8 + off_pct * 0.2, 1)
 
     for pid, pname in roster_pids.items():
         if pid not in player_profiles:
@@ -2534,14 +2592,13 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
         prof, _ = player_profiles[pid]
         preds   = def_predict_for_team(prof, team_row, fit_models, has_age,
                                         feature_names=feature_names)
-        score_df = def_compute_defensive_score(pd.DataFrame([preds]))
-        # Classify using career profile (actual historical stats), not team-adjusted predictions
-        d_type, d_desc = classify_defenseman_type(dict(prof))
-        def_score = round(score_df["defensive_score"].iloc[0], 1)
+        _, def_score, _, _ = grade_defensive_defenseman(preds, season_def_df=df)
+        _, off_score, _, _ = grade_offensive_defenseman(d_off_stats.get(pid, {}), season_off_df=d_off_df)
+        d_type, d_desc = classify_defenseman_type(dict(prof), def_score=def_score, off_score=off_score)
         player_scores[pid] = {
             **preds,
             "defensive_score": def_score,
-            "combined_score":  _combined_score(pid, def_score, d_type),
+            "combined_score":  _combined_score(def_score, off_score, d_type),
             "player_name":     pname,
             "d_type":          d_type,
             "d_desc":          d_desc,
@@ -2552,13 +2609,13 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     search_profile, _ = player_profiles[player_id]
     search_preds = def_predict_for_team(search_profile, team_row, fit_models, has_age,
                                          feature_names=feature_names)
-    search_score_df = def_compute_defensive_score(pd.DataFrame([search_preds]))
-    s_type, s_desc = classify_defenseman_type(dict(search_profile))
-    s_def_score = round(search_score_df["defensive_score"].iloc[0], 1)
+    _, s_def_score, _, _ = grade_defensive_defenseman(search_preds, season_def_df=df)
+    _, s_off_score, _, _ = grade_offensive_defenseman(d_off_stats.get(player_id, {}), season_off_df=d_off_df)
+    s_type, s_desc = classify_defenseman_type(dict(search_profile), def_score=s_def_score, off_score=s_off_score)
     player_scores[player_id] = {
         **search_preds,
         "defensive_score":    s_def_score,
-        "combined_score":     _combined_score(player_id, s_def_score, s_type),
+        "combined_score":     _combined_score(s_def_score, s_off_score, s_type),
         "player_name":        search_profile.get("player_name", "Selected Player"),
         "is_searched_player": True,
         "d_type":             s_type,
@@ -2568,7 +2625,7 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
 
     # 3. Fetch actual pairs from shift data — pass D-men pids to filter shifts
     d_pids = set(roster_pids.keys()) | {player_id}
-    actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids))
+    actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids), n_games=n_games)
 
     SLOT_NAMES      = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]
     MAX_DISPLAY     = 3
@@ -2822,11 +2879,11 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
 
 def def_build_pairing_insertion(player_id, team_code, df, team_ctx,
                              fit_models, player_profiles, has_age,
-                             feature_names=None):
+                             feature_names=None, n_games=25):
     """Wrapper that calls the actual-pair-based insertion."""
     return build_actual_pairing_insertion(
         player_id, team_code, df, team_ctx,
-        fit_models, player_profiles, has_age, feature_names
+        fit_models, player_profiles, has_age, feature_names, n_games=n_games
     )
 
 
@@ -2925,7 +2982,25 @@ DEF_AGE_CURVE = {
 }
 
 # Confidence decay per year beyond year 1
-CONFIDENCE_DECAY = {1: 1.0, 2: 0.85, 3: 0.70, 4: 0.55, 5: 0.40}
+CONFIDENCE_DECAY = {1: 1.0, 2: 0.85, 3: 0.70, 4: 0.55, 5: 0.40, 6: 0.30, 7: 0.25}
+
+
+def get_age_adjusted_confidence(year, age):
+    """
+    Return confidence adjusted for both time decay and player age.
+    Older players have steeper decay — a 34-year-old in year 4
+    is far less predictable than a 26-year-old.
+    """
+    base = CONFIDENCE_DECAY.get(year, 0.25)
+    if age >= 34:
+        age_penalty = 0.82 ** (year - 1)   # steep — late career volatility
+    elif age >= 31:
+        age_penalty = 0.90 ** (year - 1)   # moderate decline risk
+    elif age >= 28:
+        age_penalty = 0.95 ** (year - 1)   # slight — early decline range
+    else:
+        age_penalty = 1.00                  # young — no extra penalty
+    return round(min(base * age_penalty, 1.0), 3)
 
 
 def get_age_multiplier(age, is_defenseman=False):
@@ -2941,44 +3016,92 @@ def age_profile(profile, years_ahead, is_defenseman=False):
     """
     Return a copy of the player profile aged forward by years_ahead.
     Applies age curve to skill features and updates history features.
+    Defensemen use per-metric curves — physical play (hits) declines faster
+    than hockey sense (xGA/takeaways), and PIM tends to rise slightly with age.
     """
     p = profile.copy()
     current_age = float(p.get("age", 28))
 
-    # Compound the age multiplier over each year
-    cumulative_mult = 1.0
-    for y in range(years_ahead):
-        age_y = current_age + y
-        cumulative_mult *= get_age_multiplier(age_y, is_defenseman)
-
-    # Update age fields
     new_age = current_age + years_ahead
     p["age"]    = new_age
     p["age_sq"] = new_age ** 2
 
-    # Apply multiplier to skill rate features
-    skill_cols = (
-        ["ind_hits_per60", "ind_takeaways_per60", "ind_giveaways_per60",
-         "shots_blocked_by_player_per60",
-         "hd_shots_against_per60_5v5", "on_ice_corsi_pct"]
-        if is_defenseman else
-        ["finishing_skill", "finishing_skill_adj", "ind_shot_attempts_per60",
-         "ind_high_danger_shots_per60", "ind_medium_danger_shots_per60",
-         "ind_points_per60", "ind_goals_per60"]
-    )
-    for col in skill_cols:
-        if col in p.index:
-            p[col] = float(p[col]) * cumulative_mult
-
-    # Update career history features to reflect the aged season
     if is_defenseman:
+        # Per-metric age multipliers — different skills age at different rates
+        def _metric_mult(col, age, n_years):
+            """Compound annual multiplier specific to each defensive metric."""
+            mult = 1.0
+            for y in range(n_years):
+                a = age + y
+                if col == "ind_hits_per60":
+                    # Physical play declines fastest
+                    if a >= 34:   m = 0.91
+                    elif a >= 31: m = 0.95
+                    elif a >= 28: m = 0.98
+                    else:         m = 1.00
+                elif col in ("ind_takeaways_per60",):
+                    # Hockey sense holds longer
+                    if a >= 35:   m = 0.94
+                    elif a >= 32: m = 0.97
+                    elif a >= 29: m = 0.99
+                    else:         m = 1.00
+                elif col in ("hd_shots_against_per60_5v5", "on_ice_corsi_pct"):
+                    # Positioning/reads — most stable
+                    if a >= 36:   m = 0.95
+                    elif a >= 33: m = 0.98
+                    else:         m = 1.00
+                elif col == "ind_giveaways_per60":
+                    # Decision-making improves until ~30 then slowly declines
+                    if a >= 34:   m = 1.02
+                    elif a >= 30: m = 1.00
+                    else:         m = 0.99
+                else:
+                    m = get_age_multiplier(a, is_defenseman=True)
+                mult *= m
+            return mult
+
+        skill_cols = ["ind_hits_per60", "ind_takeaways_per60", "ind_giveaways_per60",
+                      "shots_blocked_by_player_per60",
+                      "hd_shots_against_per60_5v5", "on_ice_corsi_pct"]
+        for col in skill_cols:
+            if col in p.index:
+                p[col] = float(p[col]) * _metric_mult(col, current_age, years_ahead)
+
+        # PIM increases slightly with age (slower players resort to obstruction)
+        # peaks around 32-34 then drops as ice time is reduced
+        pim_mult = 1.0
+        for y in range(years_ahead):
+            a = current_age + y
+            if a <= 30:   pim_mult *= 1.01
+            elif a <= 33: pim_mult *= 1.02
+            elif a <= 35: pim_mult *= 1.00
+            else:         pim_mult *= 0.97
+        for col in ["ind_penalty_minutes_pg", "pim_pg",
+                    "prev_season_pim_pg", "recent_3yr_mean_pim_pg"]:
+            if col in p.index:
+                p[col] = float(p[col]) * pim_mult
+
+        # Update career history features
+        cumulative_mult = get_age_multiplier(current_age, is_defenseman=True) ** years_ahead
         for col in ["prev_season_hits_pg", "recent_3yr_mean_hits_pg",
                     "prev_season_takeaways_pg", "recent_3yr_mean_takeaways_pg",
-                    "prev_season_xga_pg", "recent_3yr_mean_xga_pg",
-                    "prev_season_pk_pct", "recent_3yr_mean_pk_pct"]:
+                    "prev_season_xga_pg", "recent_3yr_mean_xga_pg"]:
             if col in p.index:
                 p[col] = float(p[col]) * cumulative_mult
+
     else:
+        # Forward — uniform age curve
+        cumulative_mult = 1.0
+        for y in range(years_ahead):
+            cumulative_mult *= get_age_multiplier(current_age + y, is_defenseman=False)
+
+        skill_cols = ["finishing_skill", "finishing_skill_adj", "ind_shot_attempts_per60",
+                      "ind_high_danger_shots_per60", "ind_medium_danger_shots_per60",
+                      "ind_points_per60", "ind_goals_per60"]
+        for col in skill_cols:
+            if col in p.index:
+                p[col] = float(p[col]) * cumulative_mult
+
         for col in ["prev_season_points_pg", "recent_3yr_mean_points_pg",
                     "prev_season_goals_pg", "recent_3yr_mean_goals_pg",
                     "career_prev_mean_points_pg", "career_prev_mean_goals_pg"]:
@@ -3022,10 +3145,14 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
                                fit_models, next_models, player_profiles, has_age,
                                def_df, def_team_ctx, def_fit_models,
                                def_player_profiles, def_has_age,
-                               team, n_years, def_fit_feature_names=None):
+                               team, n_years, def_fit_feature_names=None,
+                               curr_age=None):
     """
     Build a multi-year contract projection for a player on a specific team.
     Works for both forwards (pred) and defensemen (dpred).
+
+    curr_age: actual current age (adjusted for season gap). If not provided,
+              falls back to profile age which may be 1-2 years stale.
 
     Returns a list of dicts, one per year, with predicted stats and confidence.
     """
@@ -3037,7 +3164,7 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
         pid     = dpred["pid"]
         profile = dpred["profile"]
         matched = dpred["matched"]
-        age     = float(profile.get("age", 28))
+        age     = float(curr_age) if curr_age else float(profile.get("age", 28))
 
         # Get team context for defensemen
         latest_ctx = def_get_latest_team_contexts(def_df, def_team_ctx)
@@ -3052,7 +3179,7 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
         pid      = pred["pid"]
         profile  = player_profiles[pid][0]
         matched  = pred["matched"]
-        age      = float(pred.get("age") or profile.get("age", 28) or 28)
+        age      = float(curr_age) if curr_age else float(pred.get("age") or profile.get("age", 28) or 28)
 
         # Get team context for forwards
         all_teams = get_latest_team_contexts(df, team_ctx)
@@ -3066,15 +3193,13 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
         team_row = team_row_df.iloc[0]
 
     league_env = get_latest_league_env(df)
+    d_off_stats, d_off_df, _ = load_defensive_offensive_stats() if is_d else ({}, None, None)
     rows = []
 
     for year in range(1, n_years + 1):
         aged = age_profile(profile, year - 1, is_defenseman=is_d)
-        conf  = CONFIDENCE_DECAY.get(year, 0.35)
         age_y = age + year - 1
-        mult  = 1.0
-        for y in range(year - 1):
-            mult *= get_age_multiplier(age + y, is_d)
+        conf  = get_age_adjusted_confidence(year, age_y)
 
         if is_d:
             # Set team context
@@ -3083,23 +3208,19 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
                     aged[col] = team_row[col]
             preds = def_predict_for_team(aged, team_row, def_fit_models, def_has_age,
                                             feature_names=def_fit_feature_names)
+            _, def_pct, _, _ = grade_defensive_defenseman(preds, season_def_df=def_df)
+            _, off_pct, _, _ = grade_offensive_defenseman(d_off_stats.get(pid, {}), season_off_df=d_off_df)
             row = {
-                "year":           year,
-                "age":            round(age_y, 0),
-                "confidence":     conf,
-                "hits_pg":        round(max(preds.get("ind_hits_pg", 0), 0), 2),
-                "takeaways_pg":   round(max(preds.get("ind_takeaways_pg", 0), 0), 3),
+                "year":             year,
+                "age":              round(age_y, 0),
+                "confidence":       conf,
+                "hits_pg":          round(max(preds.get("ind_hits_pg", 0), 0), 2),
+                "takeaways_pg":     round(max(preds.get("ind_takeaways_pg", 0), 0), 3),
                 "goals_against_pg": round(max(preds.get("xg_against_per60_5v5", 0), 0), 3),
-                "pim_pg":         round(max(preds.get("pim_pg", 0), 0), 3),
-                "def_score":      None,
+                "pim_pg":           round(max(preds.get("pim_pg", 0), 0), 3),
+                "def_score":        round(def_pct, 1),
+                "off_score":        round(off_pct, 1),
             }
-            # Compute defensive score for the year
-            from_preds = {"ind_hits_pg": row["hits_pg"],
-                          "ind_takeaways_pg": row["takeaways_pg"],
-                          "xg_against_per60_5v5": row["goals_against_pg"],
-                          "pim_pg": row["pim_pg"]}
-            tmp = pd.DataFrame([from_preds])
-            row["def_score"] = round(def_compute_defensive_score(tmp)["defensive_score"].iloc[0], 1)
 
         else:
             # Forward — set team and league context
@@ -3126,6 +3247,9 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
             pred_goals = max(base_goals + fit_models["goals_per_game"]["global"].predict(X)[0], 0)
             pred_gs    = max(base_gs    + fit_models["game_score_per_game"]["global"].predict(X)[0], 0)
 
+            # Percentile rank for points among forwards in the dataset
+            pts_pct = float((df["points_per_game"].dropna() < pred_pts).mean() * 100)
+
             row = {
                 "year":       year,
                 "age":        round(age_y, 0),
@@ -3133,6 +3257,7 @@ def build_contract_projection(player_name, pred, dpred, df, team_ctx,
                 "points_pg":  round(pred_pts,   3),
                 "goals_pg":   round(pred_goals,  3),
                 "gs_pg":      round(pred_gs,     3),
+                "pts_pct":    round(pts_pct,     1),
             }
 
         rows.append(row)
@@ -3187,7 +3312,7 @@ def get_cba_limits(current_age, actual_team, signing_team):
 
 def contract_risk_rating(rows, is_d):
     """
-    Assess contract risk based on age trajectory.
+    Assess contract risk based on age trajectory and percentile decline.
     Returns (rating_label, rating_color, explanation).
     """
     if not rows:
@@ -3196,26 +3321,24 @@ def contract_risk_rating(rows, is_d):
     year1 = rows[0]
     last  = rows[-1]
     n     = len(rows)
+    age_yr1 = year1["age"]
 
     if is_d:
-        score_key = "def_score"
-        y1_val    = year1.get(score_key, 50)
-        yn_val    = last.get(score_key, 50)
+        y1_val  = year1.get("def_score", 50)
+        yn_val  = last.get("def_score",  50)
     else:
-        score_key = "points_pg"
-        y1_val    = year1.get(score_key, 0)
-        yn_val    = last.get(score_key, 0)
+        y1_val  = year1.get("pts_pct", year1.get("points_pg", 0))
+        yn_val  = last.get("pts_pct",  last.get("points_pg",  0))
 
-    decline_pct = (y1_val - yn_val) / max(y1_val, 0.01)
-    age_yr1     = year1["age"]
+    decline_pts = y1_val - yn_val   # percentile points dropped
 
     if age_yr1 >= 35:
         return "Very High Risk", "#c8102e", f"Age {age_yr1:.0f} at signing — steep decline likely. 35+ rule applies."
-    elif age_yr1 >= 32 and decline_pct > 0.20:
-        return "High Risk", "#e8622a", f"Age {age_yr1:.0f} with projected {decline_pct*100:.0f}% decline over {n} years."
-    elif age_yr1 >= 30 and decline_pct > 0.10:
+    elif age_yr1 >= 32 and decline_pts > 15:
+        return "High Risk", "#e8622a", f"Age {age_yr1:.0f} — projected {decline_pts:.0f} percentile point decline over {n} years."
+    elif age_yr1 >= 30 and decline_pts > 8:
         return "Moderate Risk", "#FFD700", f"Age {age_yr1:.0f} — some decline expected but manageable."
-    elif decline_pct < 0:
-        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — ascending player, production expected to improve."
+    elif decline_pts < -5 and age_yr1 < 30:
+        return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — ascending player, percentile rank expected to improve."
     else:
         return "Low Risk", "#57a85a", f"Age {age_yr1:.0f} — stable production expected through contract."
