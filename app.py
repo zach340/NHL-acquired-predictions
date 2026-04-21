@@ -1190,33 +1190,123 @@ with tab_method:
         ---
 
         **Data Collection**
-
-        > Describe where the data came from (e.g., MoneyPuck, NHL API, ages CSV). Explain how
-        > forwards and defensemen datasets were built and what seasons are included.
-
+        All of the Data collected for this project came from MoneyPuck.com and the NHL Stats API. 
+        MoneyPuck provided the historical player-level data used to train the models, 
+        while the NHL API was used to fetch live stats for validation against current season performance.
         **Data Management**
+        I cleaned and preprocessed the MoneyPuck data to create player profiles, engineered features like
+        weighted skill profiles and team context metrics, and structured the data to feed into machine learning models.
+        When processing the data instead of dropping all of the NA i filled with 0 because in this context
+        instead of the NA meaning that the data is missing it means that the player just did not have any of that 
+        stat so it made more sense to fill with 0 instead of dropping those rows because then I would be losing a 
+        lot of players and a lot of data.
 
-        > Explain how raw data was cleaned, joined, and stored — including the use of cached
-        > `.pkl` files for trained models to avoid retraining.
 
         **Analysis & Modeling**
 
-        > Walk through the ML pipeline: feature engineering (weighted skill profiles, team context),
-        > model selection (e.g., Random Forest, Gradient Boosting), hyperparameter tuning,
-        > and how the "current fit" and "next season" models differ.
+         
+        The model uses **LightGBM** (Light Gradient Boosted Machine), a tree-based 
+        algorithm suited for sports data. Two separate model pipelines are trained —
+        one for forwards and one for defensemen — each producing three to four targets:
+        Points/Game, Goals/Game, and Game Score for forwards; Hits/Game, Takeaways/Game, PIM/Game, and xGA/60 for defensemen.
+ 
+        **Residual Modeling**
+ 
+        Rather than predicting raw stat values, each model predicts the residual, the
+        deviation from a leakage-safe baseline computed from the player's own prior-season
+        history (3-year rolling average, career average, and previous-season value, in that
+        priority order). This means the model focuses its learning capacity on what makes a
+        player outperform or underperform their own historical baseline, rather than learning
+        that good players score more, which it already knows.
+ 
+        **Feature Engineering**
+ 
+        Features fall into four groups:
+ 
+        Player skill features - derived from MoneyPuck tracking data. These include
+        finishing skill (goals relative to xG), high-danger shot share, high-danger finishing
+        rate, xG outperformance, primary assists, on-target rate, and powerplay production
+        metrics (pp ice time %, pp points/60, pp xG/60). Shot danger zones are weighted
+        empirically: high-danger shots are weighted 11.2×, medium-danger 4.1×, and
+        low-danger 1.0×. This shows the skills of the player and how they generate offense, 
+        which is crucial for predicting how they will do on a new team.
+ 
+        Career history features - all computed strictly from prior seasons to prevent data
+        leakage. These include previous-season stats, 3-year rolling means, career means,
+        career peak values, and linear trajectory slopes (both 3-year and full-career) for
+        points, goals, and game score. A player's current percentage of their career peak
+        is also included as a ceiling signal.
+ 
+        Age features - included when age data is available. These are age, age-squared
+        (to capture the non-linear career arc), and three interaction terms: age × shot
+        attempts, age × finishing skill, and age × high-danger share. These let the model
+        learn that the same skill level means something different at 25 versus 33.
+ 
+        Team context features — built by aggregating teammate statistics at the
+        team-position-season level. These capture how a given team deploys its players:
+        median ice time per game, average adjusted xG/60, high-danger shot share, primary
+        assist rate, on-target rate, and linemate quality (line-level Corsi %, xG%, and
+        high-danger xG/60). At prediction time, these features are swapped out for each of
+        the 32 NHL teams so the model can simulate how a player would perform in a
+        different system. this is a key part of the final product
+        because this is what is allowing us to beable to move athe player to a new team
+        and see how they would do in that new system.
+ 
+        **Two Model Versions**
+ 
+        The Team Fit model is trained on current-season features paired with current-season
+        targets. It answers: given this player's skill profile today, how would they likely
+        produce on each team right now? this allows us to see if for a mid season trade
+        how they would do on each team right now and which team would be the best fit for them.
+ 
+        The Next Season model is trained on current-season features paired with the
+        following season's targets. It adds five trajectory features — year-over-year
+        deltas in points, goals, and game score; games played as a fraction of 82; and
+        career year number — to help it distinguish ascending players from declining ones.
+        The most recent season for each player is excluded from this training set since no
+        future target exists for it. This model answers: given this player's skill profile today, 
+        how would they likely perform next season on each team?
+        This will help offseason moves like free agency.
+ 
+        **Training Process**
+ 
+        Both models are trained using 3-fold cross-validation to generate performance metrics
+        (MAE, RMSE, and elite-segment MAE for the top 10 percent of players). The final
+        model is then retrained on the full dataset. Players with fewer than 20 games played
+        or 300 minutes of ice time are excluded from training in order to make sure that we are not skewing the data
+        because of a small sample size. Elite players (top 10th
+        percentile by output) are upweighted 3× during training so the model allocates more
+        capacity to accurately predicting high-end outcomes, which matter most for the trade
+        and signing use case.
+ 
 
         **Choices & Limitations**
 
-        > Document decisions like forwards-only vs defensemen split, exclusion of goalies,
-        > handling of mid-season trades, and minimum games-played thresholds.
-
+        Using linear predictions of stat values (e.g., Points/Game) 
+        rather than classification or ranking models was a deliberate 
+        choice to maximize interpretability and actionable insights for GMs. 
+        While a classification model could predict whether a player would be an above-average 
+        producer on a new team, it would not provide the granular performance estimates that are 
+        more useful for contract valuation and roster construction.
+        One of the current limitations is using a linear
+        age curve to project future performance in the contract evaluator. 
+        This cause us to not capture the true non-linear nature 
+        of player aging, but it provides a transparent and easily adjustable framework 
+        for projecting decline. Future iterations could explore more sophisticated age curve modeling, .        
+        
         ---
 
         **AI Tool Usage**
+        I used AI to help with the code generations because it is able to produce large amount of
+        code in a short amount of time and it is able to help with debugging and error handling.
+        I was able to quickly test the code and make sure that it was doing what i was looking for effeciently.
+        I still needed to give the AI what i was looking for and cad some conversations on given 
+        what data we had how could we best preform the predictions and I had originally sugested 
+        using a basic linear model or a CNN but the basic linear model would have failed to capture the true data
+        and the CNN would not ave been helpful because we were not classifing the outputs so it could not do any kind 
+        of learning in that sense. It had suggested using a tree based model and that is what we ended up using 
+        and it worked really well for our data and our use case so I am really happy with how that turned out.
 
-        > If you used AI tools (e.g., Claude, ChatGPT, GitHub Copilot) during development,
-        > reflect here on how you used them, what you delegated vs. did yourself,
-        > what worked and what didn't, and what you learned about your process.
         """
     )
 
