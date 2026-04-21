@@ -1158,27 +1158,23 @@ with tab_lit:
         event detection for player movement is feasible and could serve as a data feed for
         downstream models.
 
-        > 📝 *Add a sentence or two on the technical approach: how does the scraper work?
-        > What data fields does it capture (player names, teams, assets exchanged, cap hits)?*
-
-        This source is currently out of scope for this project, as incorporating contract
-        financial data and salary cap implications adds significant complexity. However, it
-        points to a natural future direction: combining automated trade detection with the
-        predictive models built here to produce real-time contract and trade valuations.
+        They Scape a newpaper website for publicly available information about trades and signings 
+        and then post that information to a discord channel.
+        this would be useful if someone wanted the financial data and salary cap implications 
+        of trades and signings but I am not looking at that in this project so I did not use 
+        this source as much but it is still a good example of how you can use data scraping 
+        to get information about trades and signings in real time.
 
         ---
 
         ## What Do We Not Know?
 
-        The reviewed sources collectively demonstrate that the tools and data exist to
-        analyze NHL trades analytically. What is missing is a unified, forward-looking
-        approach: a model that takes a player at the moment of a trade or signing and
-        projects their likely performance *on their new team*, accounting for system fit,
-        team context, and age trajectory. This is the gap this project addresses.
-
-        > 📝 *Strengthen this closing paragraph: restate your specific research question,
-        > and explain in one or two sentences why the existing literature does not answer it.
-        > This is the most important paragraph in the entire review.*
+        Everyone looks at trades in context of the past or just reviews trades that already happened and grades based
+        on avilable stats that have already happened and not looking forward to how the players will do on their new teams.
+        One weakness is that because we are not looking forward enough is that there is not a reliable tool out their that can
+        predict how players will do on their new teams. My Goal is to be able to accurately predict how players will do on their 
+        new teams and not just look back at how they did after the trade or sigingings. I want to also improve how we view contracts
+        and build a tool that will help show how a player will look over a contract.
         """
     )
 # ── Methodology ───────────────────────────────────────────────────────────────
