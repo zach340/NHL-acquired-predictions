@@ -6,25 +6,7 @@ All model logic lives in model_utils.py.
 
 Run with:  python -m streamlit run app.py
 """
-import os
-import gdown
 
-DATA_FILES = {
-    "season_dataset.csv":    "YOUR_GDRIVE_FILE_ID",
-    "defensive_dataset.csv": "YOUR_GDRIVE_FILE_ID",
-    "player_ages.csv":       "YOUR_GDRIVE_FILE_ID",
-    "pp_features.csv":       "YOUR_GDRIVE_FILE_ID",
-    "linemate_features.csv": "YOUR_GDRIVE_FILE_ID",
-}
-
-for filename, file_id in DATA_FILES.items():
-    if not os.path.exists(filename):
-        st.info(f"Downloading {filename}...")
-        gdown.download(
-            f"https://drive.google.com/uc?id={file_id}",
-            filename, quiet=False
-        )
-        
 import streamlit as st
 from model_utils import *
 
@@ -641,28 +623,29 @@ with tab_contract:
             index=NHL_TEAMS.index(pred["actual_team"]) if pred["actual_team"] in NHL_TEAMS else 0,
             key="contract_team"
         )
-        # Resolve current age — try pred dict, then profile, then ages CSV directly
+        # Resolve current age — always try ages CSV first so season offset is applied
         _pid = pred.get("pid")
-        curr_age = pred.get("age")
+        curr_age = None
 
-        if not curr_age and is_d_contract and def_models_loaded:
-            # Defensive profiles may not carry age if model trained without age features
-            _prof = def_player_profiles.get(_pid, (None,))[0]
-            if _prof is not None:
-                curr_age = _prof.get("age")
-
-        if not curr_age and os.path.exists(AGES_FILE):
-            # Direct lookup from player_ages.csv — most reliable source
+        if os.path.exists(AGES_FILE):
             try:
                 _ages_df = pd.read_csv(AGES_FILE)
                 _row = _ages_df[_ages_df["player_id"] == _pid].sort_values("season", ascending=False)
                 if not _row.empty and pd.notna(_row.iloc[0].get("age")):
                     _latest_season = int(_row.iloc[0]["season"])
                     _base_age = float(_row.iloc[0]["age"])
-                    # Adjust to current season if the latest row isn't current
+                    # Adjust forward to current season (2026)
                     curr_age = _base_age + max(0, 2026 - _latest_season)
             except Exception:
                 pass
+
+        if not curr_age and is_d_contract and def_models_loaded:
+            _prof = def_player_profiles.get(_pid, (None,))[0]
+            if _prof is not None:
+                curr_age = _prof.get("age")
+
+        if not curr_age:
+            curr_age = pred.get("age")
 
         curr_age = float(curr_age) if curr_age and not (isinstance(curr_age, float) and curr_age != curr_age) else 28.0
 
