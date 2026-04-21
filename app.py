@@ -1073,29 +1073,100 @@ with tab_intro:
 # ── Literature Review ─────────────────────────────────────────────────────────
 with tab_lit:
     st.subheader("Literature Review")
-    st.caption("An overview of existing research and sources relevant to this project.")
+    st.caption("A survey of existing work on NHL trade and signing valuation using data analytics.")
     st.markdown(
         """
-        *A Literature Review surveys source materials relevant to the research thesis/problem and
-        provides a critical analysis that summarizes and synthesizes those sources while demonstrating
-        how this project fits within the larger discipline.*
+        ## What Do We Know?
+
+        > 📝 *Add 2–3 sentences here framing the broader problem: why is valuing player movement
+        > in the NHL difficult, and why does it matter? Think about things like sample size,
+        > team context, and the difference between past performance and future value.*
+
+        Several existing sources demonstrate that data analytics can be applied to evaluate
+        how NHL trades and signings affect team performance, though each approach has meaningful limitations.
 
         ---
 
-        **What do we know about this topic?**
+        ### NHL EDGE Stats: Rantanen's Outlook After Trade to the Hurricanes — NHL.com
 
-        > Replace this placeholder with a summary of existing literature on NHL player prediction,
-        > sports analytics, machine learning applied to hockey stats, and related subjects.
+        NHL.com's EDGE stats platform published an in-depth breakdown of Mikko Rantanen following
+        his trade to the Carolina Hurricanes. The piece provides strong descriptive depth on how
+        Rantanen performed with his previous team, drawing on tracking-level data such as shot
+        quality and on-ice impacts.
 
-        **What do we not know?**
+        > 📝 *Expand here: what specific stats or charts did they use? What did those reveal
+        > about how Rantanen fit (or didn't fit) his old team's system?*
 
-        > Identify gaps in the current literature that this project aims to address.
+        However, the analysis is entirely backward-looking — it describes what happened rather
+        than projecting what Rantanen is likely to produce in Carolina. This is the core gap
+        this project aims to fill: moving from descriptive post-trade reporting to predictive
+        modeling of future performance on a new team.
 
         ---
 
-        *Good literature reviews evaluate context, explain relationships between works, identify gaps,
-        define new ways to interpret research, address conflicts in contradictory research, and
-        identify the need for additional research.*
+        ### Hockey Analytics "-" Getting Data Directly from the NHL API "-" Hockey"-"Statistics
+
+        The Hockey-Statistics blog provides a practical walkthrough of how to query the NHL's
+        public API to retrieve player and game data without relying on third-party aggregators.
+        It outlines several methods for structuring requests and handling the data returned,
+        making it a useful methodological foundation for any hockey analytics project.
+
+        > 📝 *Add detail here: which endpoints did they document? Did you use any of these
+        > approaches in your own data pipeline? Reference this in your Methodology tab too.*
+
+        This source is less about trade valuation specifically and more about infrastructure —
+        it informs *how* data can be collected reliably, which underpins the entire analytical
+        pipeline this project depends on.
+
+        ---
+
+        ### abeck2309/nhl-trade-roi-xgar — Evaluating NHL Trades Using Realized and Expected xGAR
+
+        This GitHub project takes a quantitative approach to trade valuation by using
+        Goals Above Replacement (xGAR) as a framework for measuring return on investment
+        in NHL trades. By comparing what was given up versus what was gained in terms of
+        realized value, it offers a more rigorous method than simple point totals.
+
+        > 📝 *Add detail here: how did they define and calculate xGAR? What trades did
+        > they analyze? Did their findings align with conventional hockey wisdom or
+        > challenge it?*
+
+        Like the NHL EDGE piece, this approach is grounded in *realized* value — what
+        players actually produced after a trade. It does not attempt to forecast future
+        performance, leaving open the question of how to evaluate a trade at the moment
+        it is made rather than in hindsight.
+
+        ---
+
+        ### AAZZAZRON/TradeTracker — A Discord Bot Scraping Sportsnet for Trades and Signings
+
+        TradeTracker is a Discord bot that automatically scrapes Sportsnet — the Canadian
+        equivalent of ESPN — to detect and import the details of recent NHL trades and signings.
+        While it does not perform any valuation analysis itself, it demonstrates that automated
+        event detection for player movement is feasible and could serve as a data feed for
+        downstream models.
+
+        > 📝 *Add a sentence or two on the technical approach: how does the scraper work?
+        > What data fields does it capture (player names, teams, assets exchanged, cap hits)?*
+
+        This source is currently out of scope for this project, as incorporating contract
+        financial data and salary cap implications adds significant complexity. However, it
+        points to a natural future direction: combining automated trade detection with the
+        predictive models built here to produce real-time contract and trade valuations.
+
+        ---
+
+        ## What Do We Not Know?
+
+        The reviewed sources collectively demonstrate that the tools and data exist to
+        analyze NHL trades analytically. What is missing is a unified, forward-looking
+        approach: a model that takes a player at the moment of a trade or signing and
+        projects their likely performance *on their new team*, accounting for system fit,
+        team context, and age trajectory. This is the gap this project addresses.
+
+        > 📝 *Strengthen this closing paragraph: restate your specific research question,
+        > and explain in one or two sentences why the existing literature does not answer it.
+        > This is the most important paragraph in the entire review.*
         """
     )
 
