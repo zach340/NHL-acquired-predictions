@@ -1,7 +1,13 @@
+# Raw source data — too large for GitHub
 2008_to_2024.csv
 2008_to_2024_cleaned.csv
 2008_to_2024_cleaned2.csv
-offensive_performance_by_game.csv
-offensive_performance_by_season.csv
-offensive_performance_by_season_per60.csv
 2008_to_2024_lines.csv
+offensive_performance_by_game.csv
+offensive_performance_by_season_per60.csv
+offensive_performance_by_season_per60_rena*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+.env
