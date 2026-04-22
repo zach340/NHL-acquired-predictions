@@ -13,6 +13,9 @@ from model_utils import *
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
+# Apply team theme on every run — reads from session state so it persists
+# across tab switches without needing the player to be re-selected.
+apply_team_theme(st.session_state.get("active_team"))
 st.title("NHL Player Predictor")
 st.caption("Forwards-only mode: defensemen are excluded from training and predictions.")
 
@@ -114,9 +117,23 @@ if def_models_loaded:
     def_next_feature_names= st.session_state["def_next_feature_names"]
 
 if has_age:
-    st.caption("Age data loaded ✅ — next-season forecasting active.")
+    st.markdown(
+        '<div style="display:block;background:#1a4a2e;border:1px solid #2ecc71;'
+        'border-radius:20px;padding:6px 18px;font-size:13px;">'
+        '<span style="color:#2ecc71 !important;font-weight:700;">● Age data loaded</span>'
+        '<span style="color:#cccccc !important;"> — next-season forecasting active</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 else:
-    st.caption("⚠️ Age data not found — next-season model running without age features.")
+    st.markdown(
+        '<div style="display:block;background:#4a3000;border:1px solid #f39c12;'
+        'border-radius:20px;padding:6px 18px;font-size:13px;">'
+        '<span style="color:#f39c12 !important;font-weight:700;">⚠ Age data not found</span>'
+        '<span style="color:#cccccc !important;"> — next-season model running without age features</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ── Top-level tabs ────────────────────────────────────────────────────────────
@@ -132,59 +149,54 @@ tab_app, tab_intro, tab_lit, tab_method, tab_findings, tab_conclusion, tab_works
 
 # ── NHL Predictor (all app content) ──────────────────────────────────────────
 with tab_app:
-    # ── Player search (shared across tabs) ────────────────────────────────────────
-    st.divider()
-    # Combine forwards (from offensive df) and defensemen (from defensive df)
-    _fwd_names = set(df["player_name"].unique())
-    _def_names = set(def_df["player_name"].unique()) if def_models_loaded else set()
-    all_players = sorted(_fwd_names | _def_names)
-    player_input = st.selectbox("Search for a player", options=[""] + all_players, index=0)
+    # ── Pre-build filtered player lists ──────────────────────────────────────────
+    # Filter to players active within the last 3 seasons
+    _current_season = int(df["season"].max())
+    _cutoff_season  = _current_season - 2  # must have played in last 3 seasons
 
-    pred = None
-    if player_input:
-        # Try offensive model first (forwards)
-        first = predict_player(player_input, df, team_ctx, fit_models, next_models,
-                               player_profiles, has_age)
+    _fwd_latest = (
+        df.groupby("player_name")["season"].max()
+    )
+    _active_fwd = set(_fwd_latest[_fwd_latest >= _cutoff_season].index)
 
-        if first is None and def_models_loaded:
-            # Try defensive model (defensemen)
-            def_first = def_predict_defenseman(
-                player_input, def_df, def_team_ctx,
-                def_fit_models, def_next_models, def_player_profiles, def_has_age,
-                fit_feature_names=def_fit_feature_names,
-                next_feature_names=def_next_feature_names,
-                season_df=def_df
-            )
-            if def_first is not None:
-                # Create a minimal pred dict so tabs know a defenseman is searched
-                pred = {
-                    "pid":          def_first["pid"],
-                    "matched":      def_first["matched"],
-                    "actual_team":  def_first["actual_team"],
-                    "position":     "D",
-                    "seasons":      def_first["seasons"],
-                    "traded_teams": [],
-                    "fit_results":  None,
-                    "next_results": None,
-                    "age":          None,
-                }
-            else:
-                st.error(f"No player found matching '{player_input}'.")
-        elif first is None:
-            st.error(f"No player found matching '{player_input}'.")
-        else:
-            override_team = None
-            if first["traded_teams"]:
-                st.warning(
-                    f"{first['matched']} was traded in {first['seasons'][0]}. "
-                    f"Select their current team:"
-                )
-                override_team = st.radio(
-                    "Current team", options=first["traded_teams"],
-                    horizontal=True, key="team_override"
-                )
-            pred = predict_player(player_input, df, team_ctx, fit_models, next_models,
-                                  player_profiles, has_age, override_team=override_team)
+    if def_models_loaded:
+        _def_latest = def_df.groupby("player_name")["season"].max()
+        _cutoff_def = int(def_df["season"].max()) - 2
+        _active_def = set(_def_latest[_def_latest >= _cutoff_def].index)
+    else:
+        _active_def = set()
+
+    # Name → position maps for dropdown labels
+    _fwd_pos_map = (
+        df[df["player_name"].isin(_active_fwd)]
+          .sort_values("season", ascending=False)
+          .drop_duplicates("player_name")
+          .set_index("player_name")["position"]
+          .to_dict()
+    )
+    _def_pos_map = {name: "D" for name in _active_def} if def_models_loaded else {}
+    _all_pos_map = {**_fwd_pos_map, **_def_pos_map}
+
+    _fwd_names = sorted(_fwd_pos_map.keys())
+    _def_names = sorted(_def_pos_map.keys()) if def_models_loaded else []
+    _all_names = sorted(set(_fwd_names) | set(_def_names))
+
+    def _fmt_fwd(name):
+        if not name: return ""
+        return f"{name}  ({_fwd_pos_map.get(name, 'F')})"
+
+    def _fmt_def(name):
+        if not name: return ""
+        return f"{name}  (D)"
+
+    def _fmt_all(name):
+        if not name: return ""
+        return f"{name}  ({_all_pos_map.get(name, '?')})"
+
+    # Shared pred — populated by whichever tab last ran a search.
+    # Contract tab uses this since it handles both positions.
+    if "shared_pred" not in st.session_state:
+        st.session_state["shared_pred"] = None
 
     # ── Predictor sub-tabs ────────────────────────────────────────────────────────
     tab_off, tab_def, tab_contract, tab_model, tab_val = st.tabs([
@@ -197,19 +209,135 @@ with tab_app:
 
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
+        st.caption("Search for a forward to see offensive predictions.")
+        off_input = st.selectbox("Search for a forward", options=[""] + _fwd_names,
+                                 index=0, key="off_player_input", format_func=_fmt_fwd)
+
+        pred = None
+        if not off_input:
+            st.session_state.pop("active_team", None)  # reset to black when cleared
+        if off_input:
+            first = predict_player(off_input, df, team_ctx, fit_models, next_models,
+                                   player_profiles, has_age)
+            if first is None:
+                st.error(f"No forward found matching '{off_input}'.")
+            elif first["traded_teams"]:
+                _banner_team = st.session_state.get("off_team_override", first["traded_teams"][-1])
+                _bg  = get_team_color(_banner_team, "primary")
+                _brd = get_team_color(_banner_team, "secondary")
+                _r, _g, _b = int(_bg[1:3], 16), int(_bg[3:5], 16), int(_bg[5:7], 16)
+                _txt = "#111111" if (0.299*_r + 0.587*_g + 0.114*_b) / 255 > 0.5 else "#ffffff"
+                st.markdown(
+                    f"""<div style="background:{_bg};border-left:5px solid {_brd};
+                        padding:12px 16px;border-radius:6px;color:{_txt};
+                        font-size:15px;margin-bottom:8px;">
+                        🔁 <strong>{first['matched']}</strong> was traded in {first['seasons'][0]}.
+                        Select their current team:
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                override_team = st.radio(
+                    "Current team", options=first["traded_teams"],
+                    horizontal=True, key="off_team_override"
+                )
+                pred = predict_player(off_input, df, team_ctx, fit_models, next_models,
+                                      player_profiles, has_age, override_team=override_team)
+                if pred:
+                    st.session_state["active_team"] = pred.get("actual_team")
+                    apply_team_theme(pred.get("actual_team"))
+            else:
+                pred = first
+            if pred:
+                st.session_state["shared_pred"] = pred
+                st.session_state["active_team"] = pred.get("actual_team")
+                apply_team_theme(pred.get("actual_team"))  # apply immediately this run
+
         off_t1, off_t2, off_t3 = st.tabs(["Team Fit", "Next Season", "Roster Insertion"])
 
         with off_t1:
             if pred and pred.get("fit_results") is not None:
                 seasons_str = " → ".join(str(s) for s in pred["seasons"])
-                age_str     = f"  |  Age {pred['age']:.0f}" if pred.get("age") else ""
-                st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}  |  Seasons: {seasons_str}")
-                st.caption("Predicted performance based on current weighted skill profile across all 32 teams.")
-                st.pyplot(make_bar_chart(pred["fit_results"], pred["matched"], pred["actual_team"],
-                                         f"{pred['matched']}  |  Current skill profile  |  Seasons: {seasons_str}"))
+                age_str     = f"  |  Age {pred['age']:.0f}" if pred.get("age") is not None and pd.notna(pred.get("age")) else ""
+                # ── Player headshot + header ─────────────────────────────────
+                _col_img, _col_hdr = st.columns([1, 8])
+                with _col_img:
+                    st.markdown(get_player_headshot_html(pred["pid"]), unsafe_allow_html=True)
+                with _col_hdr:
+                    st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}  |  Seasons: {seasons_str}")
+                    st.caption("Predicted performance based on current weighted skill profile across all 32 teams.")
+
+                # ── Grade metrics ─────────────────────────────────────────────
+                _fit_row = pred["fit_results"][pred["fit_results"]["is_actual"]]
+                _fit_row = _fit_row.iloc[0] if not _fit_row.empty else pred["fit_results"].iloc[0]
+
+                def _off_pct(col, val, ref_df=df):
+                    return float((ref_df[col].dropna() < val).mean() * 100)
+
+                def _score_to_grade(s):
+                    if s >= 90: return "A"
+                    if s >= 75: return "B+"
+                    if s >= 50: return "B"
+                    if s >= 35: return "C+"
+                    if s >= 20: return "C"
+                    return "D"
+
+                _pts_pct  = _off_pct("points_per_game",     _fit_row["pred_points_per_game"])
+                _gls_pct  = _off_pct("goals_per_game",      _fit_row["pred_goals_per_game"])
+                _gs_pct   = _off_pct("game_score_per_game", _fit_row["pred_game_score_per_game"])
+                _role_score = (_pts_pct * 0.5 + _gls_pct * 0.3 + _gs_pct * 0.2)
+
+                gc1, gc2, gc3, gc4 = st.columns(4)
+                gc1.metric("Points/GP Grade",    _score_to_grade(_pts_pct),  f"Top {100-_pts_pct:.0f}%")
+                gc2.metric("Goals/GP Grade",     _score_to_grade(_gls_pct),  f"Top {100-_gls_pct:.0f}%")
+                gc3.metric("Game Score Grade",   _score_to_grade(_gs_pct),   f"Top {100-_gs_pct:.0f}%")
+                gc4.metric("Overall Grade",      _score_to_grade(_role_score),f"Top {100-_role_score:.0f}%")
+
+                # ── Per-stat percentile breakdown ─────────────────────────────
+                st.markdown("#### Category Breakdown")
+
+                def _off_pct_bar(label, val, pct):
+                    color = (
+                        "#FFD700" if pct >= 90 else
+                        "#4a90d9" if pct >= 75 else
+                        "#57a85a" if pct >= 50 else
+                        "#e8a838" if pct >= 35 else
+                        "#c8102e"
+                    )
+                    st.markdown(
+                        f"**{label}** &nbsp; `{val:.3f}` &nbsp; — &nbsp; "
+                        f"<span style='color:{color}'>**{pct:.0f}th%**</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.progress(int(pct))
+
+                _profile = player_profiles[pred["pid"]][0] if pred["pid"] in player_profiles else None
+
+                st.markdown("**Production (on actual team)**")
+                _off_pct_bar("Points / Game",     _fit_row["pred_points_per_game"],     _pts_pct)
+                _off_pct_bar("Goals / Game",      _fit_row["pred_goals_per_game"],      _gls_pct)
+                _off_pct_bar("Game Score / Game", _fit_row["pred_game_score_per_game"], _gs_pct)
+
+                if _profile is not None:
+                    st.markdown("**Skill Profile**")
+                    for _col, _label in [
+                        ("finishing_skill_adj",      "Finishing Skill (adj xG)"),
+                        ("hd_shot_share",            "High-Danger Shot Share"),
+                        ("hd_finishing",             "High-Danger Finishing"),
+                        ("primary_assist_share",     "Primary Assist Share"),
+                        ("on_target_rate",           "On-Target Rate"),
+                        ("pp_icetime_pct",           "PP Ice Time %"),
+                    ]:
+                        if _col in _profile.index and not pd.isna(_profile[_col]) and _col in df.columns:
+                            _v   = float(_profile[_col])
+                            _pct = _off_pct(_col, _v)
+                            _off_pct_bar(_label, _v, _pct)
+
+                st.plotly_chart(make_bar_chart(pred["fit_results"], pred["matched"], pred["actual_team"],
+                                         f"{pred['matched']}  |  Current skill profile  |  Seasons: {seasons_str}"),
+                                         use_container_width=True)
                 st.markdown("#### Rankings Table")
                 display = show_results_table(pred["fit_results"], pred["actual_team"])
-                csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
+                csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
                 st.download_button("Download CSV", data=csv,
                                    file_name=f"{pred['matched'].replace(' ','_')}_team_fit.csv",
                                    mime="text/csv")
@@ -218,14 +346,64 @@ with tab_app:
 
         with off_t2:
             if pred and pred.get("next_results") is not None:
-                age_str = f"  |  Age {pred['age']:.0f} → {pred['age']+1:.0f}" if pred.get("age") else ""
-                st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}")
-                st.caption("Predicted next-season performance across all 32 teams.")
-                st.pyplot(make_bar_chart(pred["next_results"], pred["matched"], pred["actual_team"],
-                                         f"{pred['matched']}  |  Next season forecast"))
+                age_str = f"  |  Age {pred['age']:.0f} → {pred['age']+1:.0f}" if pred.get("age") is not None and pd.notna(pred.get("age")) else ""
+                _col_img2, _col_hdr2 = st.columns([1, 8])
+                with _col_img2:
+                    st.markdown(get_player_headshot_html(pred["pid"]), unsafe_allow_html=True)
+                with _col_hdr2:
+                    st.subheader(f"{pred['matched']}  —  {pred['position']}  |  {pred['actual_team']}{age_str}")
+                    st.caption("Predicted next-season performance across all 32 teams.")
+
+                # ── Grade metrics ─────────────────────────────────────────────
+                _next_row = pred["next_results"][pred["next_results"]["is_actual"]]
+                _next_row = _next_row.iloc[0] if not _next_row.empty else pred["next_results"].iloc[0]
+
+                _npts_pct = _off_pct("points_per_game",     _next_row["pred_points_per_game"])
+                _ngls_pct = _off_pct("goals_per_game",      _next_row["pred_goals_per_game"])
+                _ngs_pct  = _off_pct("game_score_per_game", _next_row["pred_game_score_per_game"])
+                _nrole    = (_npts_pct * 0.5 + _ngls_pct * 0.3 + _ngs_pct * 0.2)
+
+                nc1, nc2, nc3, nc4 = st.columns(4)
+                nc1.metric("Points/GP Grade",  _score_to_grade(_npts_pct),  f"Top {100-_npts_pct:.0f}%")
+                nc2.metric("Goals/GP Grade",   _score_to_grade(_ngls_pct),  f"Top {100-_ngls_pct:.0f}%")
+                nc3.metric("Game Score Grade", _score_to_grade(_ngs_pct),   f"Top {100-_ngs_pct:.0f}%")
+                nc4.metric("Overall Grade",    _score_to_grade(_nrole),     f"Top {100-_nrole:.0f}%")
+
+                # ── Per-stat percentile breakdown ─────────────────────────────
+                st.markdown("#### Category Breakdown")
+
+                st.markdown("**Next-Season Projection (on actual team)**")
+                _off_pct_bar("Points / Game",     _next_row["pred_points_per_game"],     _npts_pct)
+                _off_pct_bar("Goals / Game",      _next_row["pred_goals_per_game"],      _ngls_pct)
+                _off_pct_bar("Game Score / Game", _next_row["pred_game_score_per_game"], _ngs_pct)
+
+                if _profile is not None and has_age and pred.get("age") is not None and pd.notna(pred.get("age")):
+                    st.markdown("**Age Trajectory**")
+                    _curr_age = pred["age"]
+                    _peak_pts = float(_profile.get("career_peak_points_pg", 0) or 0)
+                    _pct_of_peak = float(_profile.get("pct_of_peak_points", 0) or 0)
+                    if _peak_pts > 0:
+                        st.markdown(
+                            f"**Career Peak** &nbsp; `{_peak_pts:.3f} pts/gp` &nbsp; — &nbsp; "
+                            f"Currently at `{_pct_of_peak*100:.0f}%` of peak",
+                            unsafe_allow_html=True,
+                        )
+                    _slope = float(_profile.get("recent_3yr_points_slope", 0) or 0)
+                    _slope_color = "#57a85a" if _slope >= 0 else "#c8102e"
+                    _slope_label = "▲ ascending" if _slope > 0.01 else ("▼ declining" if _slope < -0.01 else "→ stable")
+                    st.markdown(
+                        f"**3-Year Trend** &nbsp; "
+                        f"<span style='color:{_slope_color}'>**{_slope_label}**</span> "
+                        f"(`{_slope:+.3f}` pts/gp per season)",
+                        unsafe_allow_html=True,
+                    )
+
+                st.plotly_chart(make_bar_chart(pred["next_results"], pred["matched"], pred["actual_team"],
+                                         f"{pred['matched']}  |  Next season forecast"),
+                                         use_container_width=True)
                 st.markdown("#### Rankings Table")
                 display = show_results_table(pred["next_results"], pred["actual_team"])
-                csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
+                csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
                 st.download_button("Download CSV", data=csv,
                                    file_name=f"{pred['matched'].replace(' ','_')}_next_season.csv",
                                    mime="text/csv")
@@ -295,21 +473,50 @@ with tab_app:
 
     # ── Defensive (nested) ────────────────────────────────────────────────────────
     with tab_def:
-        is_d = pred is not None and pred.get("position") == "D"
+        if not def_models_loaded:
+            st.warning("Defensive model not loaded. Ensure defensive_dataset.csv is present.")
+        else:
+            st.caption("Search for a defenseman to see defensive predictions.")
+            def_input = st.selectbox("Search for a defenseman", options=[""] + _def_names,
+                                     index=0, key="def_player_input", format_func=_fmt_def)
 
-        dpred = None
-        if is_d and def_models_loaded:
-            _dpred_key = f"dpred_{pred['pid']}"
-            if _dpred_key not in st.session_state:
-                with st.spinner("Computing defensive predictions..."):
-                    st.session_state[_dpred_key] = def_predict_defenseman(
-                        pred["matched"], def_df, def_team_ctx,
-                        def_fit_models, def_next_models, def_player_profiles, def_has_age,
-                        fit_feature_names=def_fit_feature_names,
-                        next_feature_names=def_next_feature_names,
-                        season_df=def_df
-                    )
-            dpred = st.session_state[_dpred_key]
+        def_pred_input = None
+        dpred          = None
+
+        if def_models_loaded and def_input:
+            def_first = def_predict_defenseman(
+                def_input, def_df, def_team_ctx,
+                def_fit_models, def_next_models, def_player_profiles, def_has_age,
+                fit_feature_names=def_fit_feature_names,
+                next_feature_names=def_next_feature_names,
+                season_df=def_df
+            )
+            if def_first is None:
+                st.error(f"No defenseman found matching '{def_input}'.")
+            else:
+                def_pred_input = {
+                    "pid":          def_first["pid"],
+                    "matched":      def_first["matched"],
+                    "actual_team":  def_first["actual_team"],
+                    "position":     "D",
+                    "seasons":      def_first["seasons"],
+                    "traded_teams": [],
+                    "fit_results":  None,
+                    "next_results": None,
+                    "age":          None,
+                }
+                st.session_state["shared_pred"] = def_pred_input
+                st.session_state["active_team"] = def_pred_input.get("actual_team")
+                apply_team_theme(def_pred_input.get("actual_team"))  # apply immediately this run
+
+                _dpred_key = f"dpred_{def_first['pid']}"
+                if _dpred_key not in st.session_state:
+                    with st.spinner("Computing defensive predictions..."):
+                        st.session_state[_dpred_key] = def_first
+                dpred = st.session_state[_dpred_key]
+
+        # Use def_pred_input as the local pred alias for defensive tab logic
+        pred = def_pred_input
 
         # Load offensive stats for this defenseman
         _d_off_stats, _d_off_df, _d_off_err = load_defensive_offensive_stats() if def_models_loaded else ({}, None, None)
@@ -322,8 +529,6 @@ with tab_app:
                 st.warning("Defensive model not loaded. Ensure defensive_dataset.csv is present.")
             elif not pred:
                 st.info("Search for a defenseman above.")
-            elif not is_d:
-                st.info(f"{pred['matched']} is a forward. Search for a defenseman to use defensive tabs.")
             elif dpred:
                 seasons_str = " → ".join(str(s) for s in dpred["seasons"])
                 # Classify and grade
@@ -336,8 +541,12 @@ with tab_app:
                 _off_grade, _off_score, _off_desc, _off_breakdown = grade_offensive_defenseman(_pid_off, season_off_df=_d_off_df) if _pid_off else ("—", 0, "", {})
                 _d_type, _d_desc = classify_defenseman_type(_profile_dict, def_score=_def_score, off_score=_off_score)
 
-                st.subheader(f"{dpred['matched']}  —  {_d_type}  |  {dpred['actual_team']}  |  Seasons: {seasons_str}")
-                st.caption(_d_desc)
+                _dc_img, _dc_hdr = st.columns([1, 8])
+                with _dc_img:
+                    st.markdown(get_player_headshot_html(pred["pid"]), unsafe_allow_html=True)
+                with _dc_hdr:
+                    st.subheader(f"{dpred['matched']}  —  {_d_type}  |  {dpred['actual_team']}  |  Seasons: {seasons_str}")
+                    st.caption(_d_desc)
 
                 # Grade display
                 def _score_to_grade(s):
@@ -407,7 +616,7 @@ with tab_app:
                         _pct_bar(cat, val, pct)
                 st.markdown("#### Rankings Table")
                 display = def_show_results_table(dpred["fit_results"], dpred["actual_team"])
-                csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
+                csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
                 st.download_button("Download CSV", data=csv,
                                    file_name=f"{dpred['matched'].replace(' ','_')}_def_fit.csv",
                                    mime="text/csv")
@@ -415,14 +624,14 @@ with tab_app:
         with def_t2:
             if not def_models_loaded:
                 st.warning("Defensive model not loaded.")
-            elif not pred or not is_d:
+            elif not pred:
                 st.info("Search for a defenseman above.")
             elif dpred:
                 st.subheader(f"{dpred['matched']}  —  D  |  {dpred['actual_team']}")
                 st.caption("Next-season defensive forecast based on current profile and trajectory.")
                 st.markdown("#### Rankings Table")
                 display = def_show_results_table(dpred["next_results"], dpred["actual_team"])
-                csv = display.drop(columns="Actual Team").to_csv(index_label="rank")
+                csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
                 st.download_button("Download CSV", data=csv,
                                    file_name=f"{dpred['matched'].replace(' ','_')}_def_next.csv",
                                    mime="text/csv")
@@ -430,7 +639,7 @@ with tab_app:
         with def_t3:
             if not def_models_loaded:
                 st.warning("Defensive model not loaded.")
-            elif not pred or not is_d:
+            elif not pred:
                 st.info("Search for a defenseman above.")
             elif dpred:
                 pc1, pc2 = st.columns([1, 1])
@@ -624,6 +833,56 @@ with tab_app:
             "Confidence decreases in later years — use ranges rather than exact numbers."
         )
 
+        contract_input = st.selectbox("Search for a player", options=[""] + _all_names,
+                                      index=0, key="contract_player_input", format_func=_fmt_all)
+        pred = None
+        if contract_input:
+            first_c = predict_player(contract_input, df, team_ctx, fit_models, next_models,
+                                     player_profiles, has_age)
+            if first_c is not None:
+                if first_c["traded_teams"]:
+                    _banner_team_c = st.session_state.get("contract_team_override", first_c["traded_teams"][-1])
+                    _bg  = get_team_color(_banner_team_c, "primary")
+                    _brd = get_team_color(_banner_team_c, "secondary")
+                    _r, _g, _b = int(_bg[1:3], 16), int(_bg[3:5], 16), int(_bg[5:7], 16)
+                    _txt = "#111111" if (0.299*_r + 0.587*_g + 0.114*_b) / 255 > 0.5 else "#ffffff"
+                    st.markdown(
+                        f"""<div style="background:{_bg};border-left:5px solid {_brd};
+                            padding:12px 16px;border-radius:6px;color:{_txt};
+                            font-size:15px;margin-bottom:8px;">
+                            🔁 <strong>{first_c['matched']}</strong> was traded. Select current team:
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                    ov = st.radio("Current team", options=first_c["traded_teams"],
+                                  horizontal=True, key="contract_team_override")
+                    pred = predict_player(contract_input, df, team_ctx, fit_models, next_models,
+                                         player_profiles, has_age, override_team=ov)
+                else:
+                    pred = first_c
+                if pred:
+                    st.session_state["active_team"] = pred.get("actual_team")
+                    apply_team_theme(pred.get("actual_team"))  # apply immediately this run
+            elif def_models_loaded:
+                def_c = def_predict_defenseman(
+                    contract_input, def_df, def_team_ctx,
+                    def_fit_models, def_next_models, def_player_profiles, def_has_age,
+                    fit_feature_names=def_fit_feature_names,
+                    next_feature_names=def_next_feature_names,
+                    season_df=def_df
+                )
+                if def_c is not None:
+                    pred = {
+                        "pid": def_c["pid"], "matched": def_c["matched"],
+                        "actual_team": def_c["actual_team"], "position": "D",
+                        "seasons": def_c["seasons"], "traded_teams": [],
+                        "fit_results": None, "next_results": None, "age": None,
+                    }
+                else:
+                    st.error(f"No player found matching '{contract_input}'.")
+            else:
+                st.error(f"No player found matching '{contract_input}'.")
+
         if not pred:
             st.info("Search for a player above to use the contract evaluator.")
         else:
@@ -702,9 +961,26 @@ with tab_app:
                 )
 
             # ── Run projection ─────────────────────────────────────────────────────
+            # Resolve dpred from session state (set by Defensive tab if a D-man was searched)
+            _contract_dpred = None
+            if is_d_contract and pred:
+                _contract_dpred_key = f"dpred_{pred['pid']}"
+                _contract_dpred = st.session_state.get(_contract_dpred_key)
+                if _contract_dpred is None:
+                    with st.spinner("Loading defensive predictions for contract..."):
+                        _contract_dpred = def_predict_defenseman(
+                            pred["matched"], def_df, def_team_ctx,
+                            def_fit_models, def_next_models, def_player_profiles, def_has_age,
+                            fit_feature_names=def_fit_feature_names,
+                            next_feature_names=def_next_feature_names,
+                            season_df=def_df
+                        )
+                        if _contract_dpred:
+                            st.session_state[_contract_dpred_key] = _contract_dpred
+
             with st.spinner("Projecting contract years..."):
                 proj_rows, proj_err = build_contract_projection(
-                    pred["matched"], pred, dpred if is_d_contract else None,
+                    pred["matched"], pred, _contract_dpred if is_d_contract else None,
                     df, team_ctx, fit_models, next_models, player_profiles, has_age,
                     def_df if def_models_loaded else pd.DataFrame(),
                     def_team_ctx if def_models_loaded else pd.DataFrame(),
@@ -1076,107 +1352,22 @@ with tab_intro:
 # ── Literature Review ─────────────────────────────────────────────────────────
 with tab_lit:
     st.subheader("Literature Review")
-    st.caption("A survey of existing work on NHL trade and signing valuation using data analytics.")
+    st.caption("An overview of existing research and sources relevant to this project.")
     st.markdown(
         """
-        ## What Do We Know?
-
-        Right now a lot of people try to look at trades and see how well they are doing but a lot of this is a 
-        reflectivelook and looking back at how a player did after the trade and not looking forward to how they 
-        will do with their new team. 
-        PRedicting how player will do on new teams is hard because there are factors off the ice
-        that can influence performance such as how they fit in the new system, how they get along with new teammates, 
-        and how they adjust to a new city.
-        Several existing sources demonstrate that data analytics can be applied to evaluate
-        how NHL trades and signings affect team performance, though each approach has meaningful limitations.
-
-        ---
-
-        ### NHL EDGE Stats: Rantanen's Outlook After Trade to the Hurricanes — NHL.com
-
-        NHL.com's EDGE stats platform published an in-depth breakdown of Mikko Rantanen following
-        his trade to the Carolina Hurricanes. The piece provides strong descriptive depth on how
-        Rantanen performed with his previous team, drawing on tracking-level data such as shot
-        quality and on-ice impacts.
-
-        The article looks at speed and line production, between both players and 
-        makes veauge predictions about how Rantanen will do in Carolina and how the other player 
-        will do in Colorado, but it is mostly focused on how he did in Colorado and not how he will do in Carolina or predicting any actual
-        performance metrics.
-        However, the analysis is entirely backward-looking — it describes what happened rather
-        than projecting what Rantanen is likely to produce in Carolina. This is the core gap
-        this project aims to fill: moving from descriptive post-trade reporting to predictive
-        modeling of future performance on a new team.
-
-        ---
-
-        ### Hockey Analytics - Getting Data Directly from the NHL API - Hockey-Statistics
-
-        The Hockey-Statistics blog provides a practical walkthrough of how to query the NHL's
-        public API to retrieve player and game data without relying on third-party aggregators.
-        It outlines several methods for structuring requests and handling the data returned,
-        making it a useful methodological foundation for any hockey analytics project.
-
-        they used different endpoints depending on the type of data they wanted to retrieve, 
-        such as player stats, game logs, or team information. 
-        I used the same API as the Website to validate the model predictions against live NHL data, 
-        so understanding how to work with the NHL API was crucial. it was also crucial to understand
-        how to store the data and how we can use the api as a tool.
-
-        This source is less about trade valuation specifically and more about infrastructure -
-        it informs *how* data can be collected reliably, which underpins the entire analytical
-        pipeline this project depends on.
-
-        ---
-
-        ### abeck2309/nhl-trade-roi-xgar — Evaluating NHL Trades Using Realized and Expected xGAR
-
-        This GitHub project takes a quantitative approach to trade valuation by using
-        Goals Above Replacement (xGAR) as a framework for measuring return on investment
-        in NHL trades. By comparing what was given up versus what was gained in terms of
-        realized value, it offers a more rigorous method than simple point totals.
-
-        They did a good job of trying to look forward in these trades and not just looking back at how the players did after the trade
-        but they still heavly relied on relized metrics with a little of the forward-looking analysis.
-        They also only focused on expeted Goals above relplacement and not looking at total points so if someone
-        is a skilled passer and play maker they will rack up points but their exepected goals above replacement might be lower because they
-        are not shooting the puck as much but they are still a very valuable player.
-        so there is some trade offs but overall this was a really good place for me to
-        start and seee where I wanted to go with this project and how I wanted to look at the data and what I wanted to predict.
-        Like the NHL EDGE piece, this approach is grounded in *realized* value- what
-        players actually produced after a trade. It does not attempt to forecast future
-        performance, leaving open the question of how to evaluate a trade at the moment
-        it is made rather than in hindsight.
-
-        ---
-
-        ### AAZZAZRON/TradeTracker — A Discord Bot Scraping Sportsnet for Trades and Signings
-
-        TradeTracker is a Discord bot that automatically scrapes Sportsnet — the Canadian
-        equivalent of ESPN — to detect and import the details of recent NHL trades and signings.
-        While it does not perform any valuation analysis itself, it demonstrates that automated
-        event detection for player movement is feasible and could serve as a data feed for
-        downstream models.
-
-        They Scape a newpaper website for publicly available information about trades and signings 
-        and then post that information to a discord channel.
-        this would be useful if someone wanted the financial data and salary cap implications 
-        of trades and signings but I am not looking at that in this project so I did not use 
-        this source as much but it is still a good example of how you can use data scraping 
-        to get information about trades and signings in real time.
-
-        ---
-
-        ## What Do We Not Know?
-
-        Everyone looks at trades in context of the past or just reviews trades that already happened and grades based
-        on avilable stats that have already happened and not looking forward to how the players will do on their new teams.
-        One weakness is that because we are not looking forward enough is that there is not a reliable tool out their that can
-        predict how players will do on their new teams. My Goal is to be able to accurately predict how players will do on their 
-        new teams and not just look back at how they did after the trade or sigingings. I want to also improve how we view contracts
-        and build a tool that will help show how a player will look over a contract.
+        some examples are NHL EDGE stats: Rantanen’s outlook after trade to Hurricanes | NHL.com, Hockey Analytics – 
+        Getting data directly from the NHL Api – Hockey-Statistics, 
+        and  abeck2309/nhl-trade-roi-xgar: Evaluating NHL trades using realized and expected xGAR. T
+        hese websites use some data analytics to look at how the new teams will perform with trades. 
+        The Rantanen post has good depth about how they performed at their old team but lacks the future projections that could be extracted.
+        The Hockey Analytics article is a good way to get data directly from NHL and how to build different ways to scrape the NHL website 
+        for its data without having to worry about some of the finer details. This is like AAZZAZRON/TradeTracker: A Discord bot that scrapes
+         Sportsnet to find the most recent NHL trades and signings which scrapes Sportsnet which is the Canadian version of ESPN and imports
+         the details of trades and signings. This is a little out of scope right now for me but would be good for the future when looking 
+         for financial impacts.
         """
     )
+
 # ── Methodology ───────────────────────────────────────────────────────────────
 with tab_method:
     st.subheader("Research Methodology")
@@ -1190,126 +1381,102 @@ with tab_method:
         ---
 
         **Data Collection**
-        All of the Data collected for this project came from MoneyPuck.com and the NHL Stats API. 
-        MoneyPuck provided the historical player-level data used to train the models, 
-        while the NHL API was used to fetch live stats for validation against current season performance.
-        **Data Management**
-        I cleaned and preprocessed the MoneyPuck data to create player profiles, engineered features like
-        weighted skill profiles and team context metrics, and structured the data to feed into machine learning models.
-        When processing the data instead of dropping all of the NA i filled with 0 because in this context
-        instead of the NA meaning that the data is missing it means that the player just did not have any of that 
-        stat so it made more sense to fill with 0 instead of dropping those rows because then I would be losing a 
-        lot of players and a lot of data.
 
+        > 📝 *Describe where the data came from (e.g., MoneyPuck, NHL API, ages CSV). Explain how
+        > forwards and defensemen datasets were built and what seasons are included.*
+
+        **Data Management**
+
+        > 📝 *Explain how raw data was cleaned, joined, and stored — including the use of cached
+        > `.joblib` files for trained models to avoid retraining on every app launch.*
+
+        ---
 
         **Analysis & Modeling**
 
-         
-        The model uses **LightGBM** (Light Gradient Boosted Machine), a tree-based 
-        algorithm suited for sports data. Two separate model pipelines are trained —
-        one for forwards and one for defensemen — each producing three to four targets:
-        Points/Game, Goals/Game, and Game Score for forwards; Hits/Game, Takeaways/Game, PIM/Game, and xGA/60 for defensemen.
- 
+        The model uses **LightGBM** (Light Gradient Boosted Machine), a tree-based ensemble
+        algorithm suited for tabular sports data. Two separate model pipelines are trained —
+        one for forwards and one for defensemen — each producing three targets:
+        Points/Game, Goals/Game, and Game Score/Game.
+
         **Residual Modeling**
- 
-        Rather than predicting raw stat values, each model predicts the residual, the
+
+        Rather than predicting raw stat values, each model predicts the *residual* — the
         deviation from a leakage-safe baseline computed from the player's own prior-season
         history (3-year rolling average, career average, and previous-season value, in that
         priority order). This means the model focuses its learning capacity on what makes a
         player outperform or underperform their own historical baseline, rather than learning
         that good players score more, which it already knows.
- 
+
         **Feature Engineering**
- 
+
         Features fall into four groups:
- 
-        Player skill features - derived from MoneyPuck tracking data. These include
+
+        *Player skill features* — derived from MoneyPuck shot tracking data. These include
         finishing skill (goals relative to xG), high-danger shot share, high-danger finishing
-        rate, xG outperformance, primary assists, on-target rate, and powerplay production
+        rate, xG outperformance, primary assist share, on-target rate, and powerplay production
         metrics (pp ice time %, pp points/60, pp xG/60). Shot danger zones are weighted
         empirically: high-danger shots are weighted 11.2×, medium-danger 4.1×, and
-        low-danger 1.0×. This shows the skills of the player and how they generate offense, 
-        which is crucial for predicting how they will do on a new team.
- 
-        Career history features - all computed strictly from prior seasons to prevent data
+        low-danger 1.0×.
+
+        *Career history features* — all computed strictly from prior seasons to prevent data
         leakage. These include previous-season stats, 3-year rolling means, career means,
         career peak values, and linear trajectory slopes (both 3-year and full-career) for
         points, goals, and game score. A player's current percentage of their career peak
         is also included as a ceiling signal.
- 
-        Age features - included when age data is available. These are age, age-squared
+
+        *Age features* — included when age data is available. These are age, age-squared
         (to capture the non-linear career arc), and three interaction terms: age × shot
         attempts, age × finishing skill, and age × high-danger share. These let the model
         learn that the same skill level means something different at 25 versus 33.
- 
-        Team context features — built by aggregating teammate statistics at the
+
+        *Team context features* — built by aggregating teammate statistics at the
         team-position-season level. These capture how a given team deploys its players:
         median ice time per game, average adjusted xG/60, high-danger shot share, primary
         assist rate, on-target rate, and linemate quality (line-level Corsi %, xG%, and
         high-danger xG/60). At prediction time, these features are swapped out for each of
         the 32 NHL teams so the model can simulate how a player would perform in a
-        different system. this is a key part of the final product
-        because this is what is allowing us to beable to move athe player to a new team
-        and see how they would do in that new system.
- 
+        different system.
+
         **Two Model Versions**
- 
-        The Team Fit model is trained on current-season features paired with current-season
+
+        The *Team Fit* model is trained on current-season features paired with current-season
         targets. It answers: given this player's skill profile today, how would they likely
-        produce on each team right now? this allows us to see if for a mid season trade
-        how they would do on each team right now and which team would be the best fit for them.
- 
-        The Next Season model is trained on current-season features paired with the
-        following season's targets. It adds five trajectory features — year-over-year
+        produce on each team right now?
+
+        The *Next Season* model is trained on current-season features paired with the
+        *following* season's targets. It adds five trajectory features — year-over-year
         deltas in points, goals, and game score; games played as a fraction of 82; and
         career year number — to help it distinguish ascending players from declining ones.
         The most recent season for each player is excluded from this training set since no
-        future target exists for it. This model answers: given this player's skill profile today, 
-        how would they likely perform next season on each team?
-        This will help offseason moves like free agency.
- 
+        future target exists for it.
+
         **Training Process**
- 
+
         Both models are trained using 3-fold cross-validation to generate performance metrics
-        (MAE, RMSE, and elite-segment MAE for the top 10 percent of players). The final
+        (MAE, RMSE, and elite-segment MAE for the top 10% of players). The final production
         model is then retrained on the full dataset. Players with fewer than 20 games played
-        or 300 minutes of ice time are excluded from training in order to make sure that we are not skewing the data
-        because of a small sample size. Elite players (top 10th
+        or 300 minutes of ice time are excluded from training. Elite players (top 10th
         percentile by output) are upweighted 3× during training so the model allocates more
         capacity to accurately predicting high-end outcomes, which matter most for the trade
         and signing use case.
- 
+
+        ---
 
         **Choices & Limitations**
 
-        Using linear predictions of stat values (e.g., Points/Game) 
-        rather than classification or ranking models was a deliberate 
-        choice to maximize interpretability and actionable insights for GMs. 
-        While a classification model could predict whether a player would be an above-average 
-        producer on a new team, it would not provide the granular performance estimates that are 
-        more useful for contract valuation and roster construction.
-        One of the current limitations is using a linear
-        age curve to project future performance in the contract evaluator. 
-        This cause us to not capture the true non-linear nature 
-        of player aging, but it provides a transparent and easily adjustable framework 
-        for projecting decline. Future iterations could explore more sophisticated age curve modeling, .        
-        
+        > 📝 *Document decisions like forwards-only vs defensemen split, exclusion of goalies,
+        > handling of mid-season trades, and any other scope constraints you made.*
+
         ---
 
         **AI Tool Usage**
-        I used AI to help with the code generations because it is able to produce large amount of
-        code in a short amount of time and it is able to help with debugging and error handling.
-        I was able to quickly test the code and make sure that it was doing what i was looking for effeciently.
-        I still needed to give the AI what i was looking for and cad some conversations on given 
-        what data we had how could we best preform the predictions and I had originally sugested 
-        using a basic linear model or a CNN but the basic linear model would have failed to capture the true data
-        and the CNN would not ave been helpful because we were not classifing the outputs so it could not do any kind 
-        of learning in that sense. It had suggested using a tree based model and that is what we ended up using 
-        and it worked really well for our data and our use case so I am really happy with how that turned out.
 
+        > 📝 *If you used AI tools (e.g., Claude, ChatGPT, GitHub Copilot) during development,
+        > reflect here on how you used them, what you delegated vs. did yourself,
+        > what worked and what didn't, and what you learned about your process.*
         """
     )
-
 # ── Analysis & Findings ───────────────────────────────────────────────────────
 with tab_findings:
     st.subheader("Analysis & Findings")

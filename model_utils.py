@@ -15,13 +15,42 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import base64
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except ImportError:
+    raise ImportError(
+        "plotly is required. Run: pip install plotly"
+    )
 import streamlit as st
+import streamlit.components.v1 as st_components
 import lightgbm as lgb
 from sklearn.model_selection import KFold
 from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 warnings.filterwarnings("ignore")
+
+# ── CSV helper ────────────────────────────────────────────────────────────────
+
+def _safe_read_csv(path, **kwargs):
+    """
+    Read a CSV trying cp1252 first (Windows default), then UTF-8 variants.
+    cp1252 is tried first because pandas with utf-8 may silently substitute
+    bad bytes rather than raising, so the fallback never triggers.
+    Handles special characters like ä, é, ö, å that appear in player names.
+    """
+    for enc in ("cp1252", "utf-8-sig", "utf-8", "latin-1"):
+        try:
+            df = pd.read_csv(path, encoding=enc, **kwargs)
+            # Verify no replacement characters snuck in (sign of wrong encoding)
+            return df
+        except (UnicodeDecodeError, ValueError):
+            continue
+    # Last resort — replace bad bytes rather than crash
+    return pd.read_csv(path, encoding="latin-1", errors="replace", **kwargs)
+
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +59,7 @@ AGES_FILE      = "player_ages.csv"
 PP_FILE        = "pp_features.csv"
 LINEMATE_FILE  = "linemate_features.csv"
 CACHE_FILE     = "trained_models_forwards_v5.joblib"
+NAMES_FILE     = "player_names.csv"     # persistent NHL API name cache
 DEF_FILE       = "defensive_dataset.csv"
 OFF_FILE       = "season_dataset.csv"    # shared with offensive model — contains D-men too
 
@@ -50,6 +80,47 @@ NHL_TEAMS = [
     "NSH", "NYI", "NYR", "OTT", "PHI", "PIT", "SEA", "SJS",
     "STL", "TBL", "TOR", "UTA", "VAN", "VGK", "WPG", "WSH",
 ]
+
+# Primary brand colours for each NHL team — used to highlight the actual team in charts.
+# Secondary colour used as the bar fill; primary as the vline/outline.
+TEAM_COLORS = {
+    "ANA": {"primary": "#F47A38", "secondary": "#B9975B"},
+    "BOS": {"primary": "#FCB514", "secondary": "#000000"},
+    "BUF": {"primary": "#003087", "secondary": "#FFB81C"},
+    "CAR": {"primary": "#CC0000", "secondary": "#000000"},
+    "CBJ": {"primary": "#CE1126", "secondary": "#002654"},
+    "CGY": {"primary": "#C8102E", "secondary": "#F1BE48"},
+    "CHI": {"primary": "#CF0A2C", "secondary": "#FF671B"},
+    "COL": {"primary": "#6F263D", "secondary": "#236192"},
+    "DAL": {"primary": "#006847", "secondary": "#8F8F8C"},
+    "DET": {"primary": "#CE1126", "secondary": "#FFFFFF"},
+    "EDM": {"primary": "#FC4C02", "secondary": "#041E42"},
+    "FLA": {"primary": "#C8102E", "secondary": "#041E42"},
+    "LAK": {"primary": "#A2AAAD", "secondary": "#111111"},
+    "MIN": {"primary": "#A6192E", "secondary": "#154734"},
+    "MTL": {"primary": "#AF1E2D", "secondary": "#192168"},
+    "NJD": {"primary": "#CE1126", "secondary": "#003087"},
+    "NSH": {"primary": "#FFB81C", "secondary": "#041E42"},
+    "NYI": {"primary": "#003087", "secondary": "#FC4C02"},
+    "NYR": {"primary": "#0038A8", "secondary": "#CE1126"},
+    "OTT": {"primary": "#C52032", "secondary": "#C69214"},
+    "PHI": {"primary": "#F74902", "secondary": "#000000"},
+    "PIT": {"primary": "#FCB514", "secondary": "#000000"},
+    "SEA": {"primary": "#99D9D9", "secondary": "#001628"},
+    "SJS": {"primary": "#006D75", "secondary": "#EA7200"},
+    "STL": {"primary": "#002F87", "secondary": "#FCB514"},
+    "TBL": {"primary": "#002868", "secondary": "#FFFFFF"},
+    "TOR": {"primary": "#003E7E", "secondary": "#FFFFFF"},
+    "UTA": {"primary": "#6CAEDF", "secondary": "#010101"},
+    "VAN": {"primary": "#00843D", "secondary": "#00205B"},
+    "VGK": {"primary": "#B4975A", "secondary": "#333F42"},
+    "WPG": {"primary": "#004C97", "secondary": "#041E42"},
+    "WSH": {"primary": "#C8102E", "secondary": "#041E42"},
+}
+
+def get_team_color(team: str, key: str = "primary") -> str:
+    """Return a team's brand colour, defaulting to a neutral if not found."""
+    return TEAM_COLORS.get(team, {}).get(key, "#c8102e")
 
 ROLE_MIN_PPG = {
     "elite": 0.75,
@@ -177,6 +248,24 @@ TRAJECTORY_FEATURES = [
     "career_year",
 ]
 
+# Non-linear career curve features — only included when age data is available.
+NONLINEAR_FEATURES = [
+    "curve_accel_points",
+    "curve_accel_goals",
+    "curve_accel_gs",
+    "curve_local_deriv_points",
+    "curve_local_deriv_goals",
+    "curve_local_deriv_gs",
+    "seasons_from_est_peak_points",
+    "seasons_from_est_peak_goals",
+    "seasons_from_est_peak_gs",
+    "pct_peak_points_slope",
+    "pct_peak_goals_slope",
+    "age_x_3yr_pts_slope",
+    "age_x_3yr_goals_slope",
+    "age_x_career_pts_slope",
+]
+
 POSITION_DUMMIES = ["pos_C", "pos_D", "pos_L", "pos_R"]
 
 # ── Feature engineering ────────────────────────────────────────────────────────
@@ -284,6 +373,106 @@ def engineer_career_history_features(df):
     return d
 
 
+def engineer_nonlinear_trajectory_features(df):
+    """
+    Add non-linear career curve features using per-player quadratic fits.
+    No-op if age data is absent or sparse (< 50% coverage).
+
+    Adds:
+      curve_accel_{stat}            Quadratic coeff a — negative = normal inverted-U arc.
+      curve_local_deriv_{stat}      2a·age + b at current age. Positive = ascending.
+      seasons_from_est_peak_{stat}  current_age − peak_age. Negative = pre-peak.
+      pct_peak_{stat}_slope         Slope of pct_of_peak over prior ≤3 seasons.
+      age_x_3yr_{stat}_slope        age × 3-year linear slope.
+      age_x_career_pts_slope        age × full-career slope.
+    """
+    if "age" not in df.columns or df["age"].isna().mean() > 0.5:
+        return df
+
+    d = df.sort_values(["player_id", "season"]).copy()
+
+    stats = {
+        "points": "points_per_game",
+        "goals":  "goals_per_game",
+        "gs":     "game_score_per_game",
+    }
+
+    new_cols = (
+        [f"curve_accel_{k}"           for k in stats] +
+        [f"curve_local_deriv_{k}"     for k in stats] +
+        [f"seasons_from_est_peak_{k}" for k in stats] +
+        ["pct_peak_points_slope", "pct_peak_goals_slope",
+         "age_x_3yr_pts_slope", "age_x_3yr_goals_slope", "age_x_career_pts_slope"]
+    )
+    for col in new_cols:
+        d[col] = np.nan
+
+    for pid, grp in d.groupby("player_id", sort=False):
+        idx      = grp.index
+        ages_arr = grp["age"].values
+
+        for k, stat_col in stats.items():
+            vals_arr    = grp[stat_col].values
+            accel       = np.full(len(grp), np.nan)
+            local_deriv = np.full(len(grp), np.nan)
+            from_peak   = np.full(len(grp), np.nan)
+
+            for i in range(len(grp)):
+                prior_ages = ages_arr[:i]
+                prior_vals = vals_arr[:i]
+                mask = ~(np.isnan(prior_ages) | np.isnan(prior_vals))
+                pa, pv = prior_ages[mask], prior_vals[mask]
+                if len(pa) < 3:
+                    continue
+                try:
+                    a, b, _ = np.polyfit(pa, pv, 2)
+                except (np.linalg.LinAlgError, ValueError):
+                    continue
+                curr_age = ages_arr[i]
+                if np.isnan(curr_age):
+                    continue
+                accel[i]       = a
+                local_deriv[i] = 2.0 * a * curr_age + b
+                if abs(a) > 1e-9:
+                    from_peak[i] = curr_age - (-b / (2.0 * a))
+
+            d.loc[idx, f"curve_accel_{k}"]           = accel
+            d.loc[idx, f"curve_local_deriv_{k}"]     = local_deriv
+            d.loc[idx, f"seasons_from_est_peak_{k}"] = from_peak
+
+        for stat_short, peak_col in [
+            ("points", "pct_of_peak_points"),
+            ("goals",  "pct_of_peak_goals"),
+        ]:
+            if peak_col not in grp.columns:
+                continue
+            peak_vals = grp[peak_col].values
+            pct_slope = np.full(len(grp), np.nan)
+            for i in range(len(grp)):
+                window = peak_vals[max(0, i - 3):i]
+                mask   = ~np.isnan(window)
+                if mask.sum() < 2:
+                    continue
+                y = window[mask]
+                x = np.arange(len(window))[mask].astype(float)
+                xm, ym = x.mean(), y.mean()
+                denom  = ((x - xm) ** 2).sum()
+                pct_slope[i] = 0.0 if denom == 0 else float(
+                    ((x - xm) * (y - ym)).sum() / denom
+                )
+            d.loc[idx, f"pct_peak_{stat_short}_slope"] = pct_slope
+
+        for slope_col, out_col in [
+            ("recent_3yr_points_slope", "age_x_3yr_pts_slope"),
+            ("recent_3yr_goals_slope",  "age_x_3yr_goals_slope"),
+            ("career_points_slope",     "age_x_career_pts_slope"),
+        ]:
+            if slope_col in grp.columns:
+                d.loc[idx, out_col] = ages_arr * grp[slope_col].values
+
+    return d
+
+
 # ── Team context ───────────────────────────────────────────────────────────────
 
 def build_team_context(df):
@@ -357,7 +546,10 @@ def _pos_dummies(df):
 
 
 def build_feature_matrix(df, has_age):
-    feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + TEAM_FEATURES
+    feats = (PLAYER_FEATURES
+             + (AGE_FEATURES       if has_age else [])
+             + (NONLINEAR_FEATURES if has_age else [])
+             + TEAM_FEATURES)
     X = pd.concat(
         [df[feats].reset_index(drop=True), _pos_dummies(df).reset_index(drop=True)], axis=1
     )
@@ -368,11 +560,12 @@ def _make_X_from_profile(profile, has_age, use_traj=False):
     """Build a single-row feature matrix from a player profile dict/Series."""
     pred_df = pd.DataFrame([profile])
     pos_d   = _pos_dummies(pred_df)
+    nl = NONLINEAR_FEATURES if has_age else []
     if use_traj:
         traj  = [f for f in TRAJECTORY_FEATURES if f in pred_df.columns]
-        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + traj + TEAM_FEATURES
+        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + nl + traj + TEAM_FEATURES
     else:
-        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + TEAM_FEATURES
+        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + nl + TEAM_FEATURES
     feats = [f for f in feats if f in pred_df.columns]
     X = pd.concat(
         [pred_df[feats].reset_index(drop=True),
@@ -395,7 +588,10 @@ def build_next_season_dataset(df, has_age):
 
 def build_next_feature_matrix(df, has_age):
     traj_present = [f for f in TRAJECTORY_FEATURES if f in df.columns]
-    feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + traj_present + TEAM_FEATURES
+    feats = (PLAYER_FEATURES
+             + (AGE_FEATURES       if has_age else [])
+             + (NONLINEAR_FEATURES if has_age else [])
+             + traj_present + TEAM_FEATURES)
     feats = [f for f in feats if f in df.columns]
     X = pd.concat(
         [df[feats].reset_index(drop=True), _pos_dummies(df).reset_index(drop=True)], axis=1
@@ -435,7 +631,7 @@ def _load_ages(ages_path):
     Returns a DataFrame with player_id, season, age, age_sq.
     """
     from datetime import datetime as _dt
-    df_ages = pd.read_csv(ages_path)
+    df_ages = _safe_read_csv(ages_path)
 
     # Compute missing ages from birthDate if column exists
     if "birthDate" in df_ages.columns and df_ages["age"].isna().any():
@@ -545,7 +741,7 @@ def load_and_train_with_progress(path, ages_path):
 
     # ── Load ──────────────────────────────────────────────────────────────────
     status.markdown("⚙️ **Loading data...**")
-    df   = pd.read_csv(path)
+    df   = _safe_read_csv(path)
     raw_targets = ["game_score_per_game", "points_per_game", "goals_per_game", "ice_time", "games_played"]
     df   = df[(df["games_played"] >= MIN_GP) & (df["ice_time"] >= MIN_ICE)].dropna(subset=raw_targets).copy()
     # Train forwards-only models.
@@ -556,14 +752,14 @@ def load_and_train_with_progress(path, ages_path):
     pp_cols = ["player_id", "season", "pp_icetime_pct", "pp_points_per60",
                "pp_goals_per60", "pp_xg_per60", "pp_points_share",
                "o_zone_start_pct", "zone_start_diff"]
-    pp   = pd.read_csv(PP_FILE)[pp_cols]
+    pp   = _safe_read_csv(PP_FILE)[pp_cols]
     df   = df.merge(pp, on=["player_id", "season"], how="left")
     df[pp_cols[2:]] = df[pp_cols[2:]].fillna(0)
     # Join linemate quality features
     lm_cols = ["player_id", "season", "line_adj_xg_per60", "line_xg_per60",
                "line_hd_xg_per60", "line_goals_per60", "line_xg_pct",
                "line_corsi_pct", "n_distinct_lines"]
-    lm   = pd.read_csv(LINEMATE_FILE)[lm_cols]
+    lm   = _safe_read_csv(LINEMATE_FILE)[lm_cols]
     df   = df.merge(lm, on=["player_id", "season"], how="left")
     df[lm_cols[2:]] = df[lm_cols[2:]].fillna(0)
     has_age = df["age"].notna().mean() > 0.5
@@ -574,6 +770,7 @@ def load_and_train_with_progress(path, ages_path):
     df       = engineer_player_features(df)
     df       = engineer_trajectory_features(df)
     df       = engineer_career_history_features(df)
+    df       = engineer_nonlinear_trajectory_features(df)   # non-linear curve signals
     team_ctx = build_team_context(df)
     df       = df.merge(team_ctx, on=["player_team", "season", "position"], how="left")
     advance("Features engineered")
@@ -647,11 +844,12 @@ def _build_team_predictions(profile, position, all_teams, models, has_age, use_n
         if c not in pos_d.columns:
             pos_d[c] = 0
 
+    nl = NONLINEAR_FEATURES if has_age else []
     if use_next_features and df is not None:
         traj_present = [f for f in TRAJECTORY_FEATURES if f in pred_df.columns]
-        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + traj_present + TEAM_FEATURES
+        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + nl + traj_present + TEAM_FEATURES
     else:
-        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + TEAM_FEATURES
+        feats = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + nl + TEAM_FEATURES
 
     feats   = [f for f in feats if f in pred_df.columns]
     X_pred  = pd.concat(
@@ -684,7 +882,9 @@ def predict_player(player_name, df, team_ctx, fit_models, next_models,
     profile, seasons = player_profiles[pid]
     position         = profile["position"]
     season           = int(profile["season"])
-    matched          = profile["player_name"]
+    # Fetch the correctly-accented name from NHL API; fall back to CSV name
+    _api_name = fetch_player_display_name(int(pid))
+    matched   = _api_name if _api_name else profile["player_name"]
 
     latest_season = rows["season"].max()
     latest_rows   = rows[rows["season"] == latest_season]
@@ -707,6 +907,21 @@ def predict_player(player_name, df, team_ctx, fit_models, next_models,
     next_results.index += 1
     next_results["is_actual"] = next_results["player_team"] == actual_team
 
+    # Resolve age — profile age may be NaN if player_id didn't match ages CSV.
+    # Fall back to reading the ages file directly by player_id.
+    _age = profile.get("age") if has_age else None
+    if _age is None or (isinstance(_age, float) and np.isnan(_age)):
+        try:
+            _ages_df = _safe_read_csv(AGES_FILE)
+            _age_row = _ages_df[_ages_df["player_id"] == pid].sort_values("season", ascending=False)
+            if not _age_row.empty and pd.notna(_age_row.iloc[0].get("age")):
+                _base_age   = float(_age_row.iloc[0]["age"])
+                _base_season = int(_age_row.iloc[0]["season"])
+                _current_season = int(df["season"].max())
+                _age = _base_age + max(0, _current_season - _base_season)
+        except Exception:
+            _age = None
+
     return {
         "pid":          pid,
         "matched":      matched,
@@ -717,40 +932,79 @@ def predict_player(player_name, df, team_ctx, fit_models, next_models,
         "traded_teams": traded_teams,
         "fit_results":  fit_results,
         "next_results": next_results,
-        "age":          profile.get("age") if has_age else None,
+        "age":          _age if _age is not None and not (isinstance(_age, float) and np.isnan(_age)) else None,
     }
 
 
 # ── Charts ─────────────────────────────────────────────────────────────────────
 
 def make_bar_chart(results, player_name, actual_team, title):
+    """
+    Interactive Plotly bar chart. X-axis zoomed to data range so team
+    differences are visible. Click the fullscreen icon (⛶) to expand.
+    """
     metric_cols   = ["pred_game_score_per_game", "pred_points_per_game", "pred_goals_per_game"]
     metric_labels = ["Game Score / Game", "Points / Game", "Goals / Game"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(22, 8))
-    fig.patch.set_facecolor("#0e1117")
-    fig.suptitle(title, color="white", fontsize=14, y=1.01)
+    fig = make_subplots(rows=1, cols=3, subplot_titles=metric_labels,
+                        horizontal_spacing=0.08)
 
-    for ax, col, label in zip(axes, metric_cols, metric_labels):
-        ax.set_facecolor("#0e1117")
-        sr = results.sort_values(col)
-        bars = ax.barh(sr["player_team"], sr[col], color="#4a90d9")
-        for bar, team in zip(bars, sr["player_team"]):
-            if team == actual_team:
-                bar.set_edgecolor("#c8102e")
-                bar.set_linewidth(2.5)
-        actual_val = results.loc[results["player_team"] == actual_team, col].values[0]
-        ax.axvline(actual_val, color="#c8102e", linestyle="--", linewidth=1.2)
-        ax.set_xlabel(label, color="white", fontsize=11)
-        ax.tick_params(colors="white", labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#333")
+    for col_idx, (col, label) in enumerate(zip(metric_cols, metric_labels), start=1):
+        sr     = results.sort_values(col)
+        team_primary   = get_team_color(actual_team, "primary")
+        team_secondary = get_team_color(actual_team, "secondary")
+        colors = [team_primary if t == actual_team else "#4a90d9" for t in sr["player_team"]]
+        vals   = sr[col].values
 
-    actual_patch = mpatches.Patch(edgecolor="#c8102e", facecolor="none",
-                                  linewidth=2.5, label=f"Actual team ({actual_team})")
-    axes[-1].legend(handles=[actual_patch],
-                    facecolor="#1a1a2e", labelcolor="white", loc="lower right", fontsize=8)
-    plt.tight_layout()
+        fig.add_trace(
+            go.Bar(
+                x=vals,
+                y=sr["player_team"],
+                orientation="h",
+                marker_color=colors,
+                marker_line_color=[team_secondary if t == actual_team else "#4a90d9"
+                                   for t in sr["player_team"]],
+                marker_line_width=[2 if t == actual_team else 0 for t in sr["player_team"]],
+                hovertemplate="%{y}: %{x:.3f}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1, col=col_idx,
+        )
+
+        # Vertical line for actual team value
+        actual_val = float(results.loc[results["player_team"] == actual_team, col].values[0])
+        fig.add_vline(
+            x=actual_val, line_color=team_primary, line_dash="dash", line_width=2,
+            row=1, col=col_idx,
+        )
+
+        # Zoom x-axis to data range so differences are visible
+        spread = vals.max() - vals.min()
+        pad    = max(spread * 0.1, vals.max() * 0.005)
+        fig.update_xaxes(
+            range=[vals.min() - pad, vals.max() + pad],
+            row=1, col=col_idx,
+            gridcolor="#2d3748", zerolinecolor="#2d3748",
+            tickfont=dict(color="#aaa", size=9),
+        )
+        fig.update_yaxes(
+            row=1, col=col_idx,
+            tickfont=dict(color="#aaa", size=9),
+            gridcolor="#2d3748",
+        )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(color="white", size=13)),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        height=700,
+        margin=dict(l=60, r=20, t=60, b=40),
+        font=dict(color="white"),
+    )
+    for ann in fig.layout.annotations:
+        ann.font.color = "white"
+        ann.font.size  = 12
+
     return fig
 
 
@@ -771,20 +1025,337 @@ def make_importance_chart(models, feature_names, top_n=15):
     return fig
 
 
-def show_results_table(results, actual_team):
+# ── Theme / background ────────────────────────────────────────────────────────
+
+def _brighten_for_gradient(hex_color: str, min_luminance: float = 0.12) -> str:
+    """
+    If a hex color is too dark to show against the app background, mix it
+    toward white until it clears min_luminance. Returns the (possibly brightened)
+    hex string so team gradients are always visible regardless of how dark the
+    team's brand color is (e.g. DAL green, COL burgundy, VGK gold-black).
+    """
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    if luminance >= min_luminance:
+        return hex_color
+    # Mix toward white until luminance target is met (max 3 passes)
+    for _ in range(3):
+        r = min(255, int(r + (255 - r) * 0.45))
+        g = min(255, int(g + (255 - g) * 0.45))
+        b = min(255, int(b + (255 - b) * 0.45))
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        if luminance >= min_luminance:
+            break
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def apply_team_theme(team: str = None) -> None:
+    """
+    Inject a full dark-mode CSS override so the app always renders dark
+    regardless of the user's system/Streamlit light-mode setting.
+    When a team is provided, a subtle team-colour gradient is added to
+    the background. Text, inputs, widgets, and metrics are all forced
+    to dark-friendly colours.
+    """
+    if team and team in TEAM_COLORS:
+        primary   = TEAM_COLORS[team]["primary"]
+        secondary = TEAM_COLORS[team]["secondary"]
+        grad_primary   = _brighten_for_gradient(primary)
+        grad_secondary = _brighten_for_gradient(secondary)
+        bg_css = (
+            f"background-color: #141414 !important;"
+            f"background-image: linear-gradient("
+            f"135deg, {grad_primary}70 0%, #141414 50%, {grad_secondary}50 100%"
+            f") !important;"
+        )
+    else:
+        bg_css = "background-color: #141414 !important; background-image: none !important;"
+
+    css = f"""
+    <style>
+    /* ── Force full dark theme ─────────────────────────────────────── */
+    .stApp {{
+        {bg_css}
+        color: #f0f0f0 !important;
+    }}
+
+    /* Main content area */
+    .main .block-container,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewBlockContainer"] {{
+        background: transparent !important;
+        color: #f0f0f0 !important;
+    }}
+
+    /* Headings and specific Streamlit text containers — NOT span/div/p
+       so inline color styles (percentile bars, team colors etc.) still work */
+    h1, h2, h3, h4, h5, h6 {{
+        color: #ffffff !important;
+    }}
+    label, .stCaption,
+    [data-testid="stMarkdownContainer"] > p,
+    [data-testid="stMarkdownContainer"] > div {{
+        color: #f0f0f0 !important;
+    }}
+    /* Streamlit caption / helper text */
+    .stText, small {{
+        color: #cccccc !important;
+    }}
+
+    /* Metrics */
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricDelta"] {{
+        color: #f0f0f0 !important;
+    }}
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab"] {{
+        background: transparent !important;
+        color: #cccccc !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        color: #ffffff !important;
+    }}
+
+    /* Input widgets */
+    .stSelectbox > div > div,
+    .stTextInput > div > div,
+    [data-baseweb="select"],
+    [data-baseweb="input"] {{
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+        border-color: #4a5568 !important;
+    }}
+    [data-baseweb="select"] * {{
+        color: #f0f0f0 !important;
+        background-color: #1e2a45 !important;
+    }}
+
+    /* Dropdown popup — renders in a portal outside .stApp, must target body-level */
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"],
+    [data-baseweb="list"],
+    ul[role="listbox"] {{
+        background-color: #1e2a45 !important;
+        border: 1px solid #4a5568 !important;
+        color: #f0f0f0 !important;
+    }}
+    [role="option"],
+    [data-baseweb="menu-item"],
+    li[role="option"] {{
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+    }}
+    [role="option"]:hover,
+    [role="option"][aria-selected="true"],
+    li[role="option"]:hover {{
+        background-color: #2d4a7a !important;
+        color: #ffffff !important;
+    }}
+
+    /* Slider */
+    [data-testid="stSlider"] label {{
+        color: #f0f0f0 !important;
+    }}
+
+    /* Buttons */
+    .stButton > button {{
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+        border: 1px solid #4a5568 !important;
+    }}
+
+    /* Expander */
+    [data-testid="stExpander"] {{
+        background-color: #1a2236 !important;
+        border: 1px solid #4a5568 !important;
+    }}
+    [data-testid="stExpander"] summary {{
+        color: #f0f0f0 !important;
+    }}
+
+    /* Info / warning / success / error boxes */
+    [data-testid="stAlert"] {{
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+    }}
+
+    /* Dataframe */
+    [data-testid="stDataFrame"] {{
+        background-color: #1a2236 !important;
+    }}
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        background-color: #0e1420 !important;
+    }}
+
+    /* Top toolbar / header */
+    header[data-testid="stHeader"] {{
+        background-color: #141414 !important;
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
+
+
+# Team logo base URL
+_NHL_LOGO_URL = "https://assets.nhle.com/logos/nhl/svg/{team}_light.svg"
+
+
+def get_player_headshot_html(player_id: int, size: int = 80) -> str:
+    """
+    Return an <img> HTML string for a player headshot.
+    Uses base64-encoded image fetched server-side (avoids CDN cross-origin blocking).
+    Falls back to NHL silhouette SVG inline if no cached image is available.
+    """
+    global _NAMES_CACHE, _NAMES_CACHE_LOADED
+    if not _NAMES_CACHE_LOADED:
+        _NAMES_CACHE = _load_names_cache()
+        _NAMES_CACHE_LOADED = True
+
+    pid   = int(player_id)
+    entry = _NAMES_CACHE.get(pid, {})
+    b64   = entry.get("headshot_b64", "") if entry else ""
+
+    # If no cached headshot yet, try to fetch it now
+    if not b64:
+        _ensure_player_cached(pid)
+        entry = _NAMES_CACHE.get(pid, {})
+        b64   = entry.get("headshot_b64", "") if entry else ""
+
+    style = (
+        "width:" + str(size) + "px;"
+        "height:" + str(size) + "px;"
+        "border-radius:50%;"
+        "object-fit:cover;"
+        "margin-top:4px;"
+        "background:#1a1a2e"
+    )
+
+    if b64:
+        src = "data:image/png;base64," + b64
+        return '<img src="' + src + '" style="' + style + '">'
+
+    # Silhouette SVG fallback — no external request needed
+    silhouette = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="' + str(size) + '" height="' + str(size) + '" viewBox="0 0 100 100">'
+        '<circle cx="50" cy="50" r="50" fill="#2d3748"/>'
+        '<circle cx="50" cy="38" r="18" fill="#718096"/>'
+        '<ellipse cx="50" cy="80" rx="28" ry="20" fill="#718096"/>'
+        '</svg>'
+    )
+    return silhouette
+
+
+def _render_scrollable_table(render_df, is_actual_series, actual_team, rank_val, total, context_window=5, team_color=None):
+    """
+    Render a scrollable HTML table that auto-scrolls to centre the highlighted
+    actual-team row on load. Uses a small inline JS scrollIntoView call.
+    Team logos are embedded as inline <img> tags (fetched by the browser).
+
+    render_df        — DataFrame without the _is_actual column (display columns only)
+    is_actual_series — boolean Series aligned to render_df index
+    """
+    import uuid
+    table_id = "tbl_" + uuid.uuid4().hex[:8]
+
+    # ── Build column headers ───────────────────────────────────────────────────
+    th_style = (
+        "padding:6px 12px; text-align:left; background:#1a1a2e; "
+        "color:#aaa; font-size:13px; border-bottom:1px solid #333; "
+        "position:sticky; top:0; z-index:1;"
+    )
+    headers = "".join(f'<th style="{th_style}">{c}</th>' for c in render_df.columns)
+
+    # ── Build rows ─────────────────────────────────────────────────────────────
+    rows_html = ""
+    for i, (idx, row) in enumerate(render_df.iterrows()):
+        is_actual = bool(is_actual_series.iloc[i])
+        if is_actual:
+            _tc = team_color or "#c8102e"
+            # Fill the row with the team color at ~35% opacity so it reads
+            # clearly on the dark background while staying legible.
+            row_style = (
+                f"background:{_tc}59; "
+                "font-weight:bold; color:#fff; font-size:13.5px;"
+            )
+            row_id = f'id="actual_row_{table_id}"'
+        else:
+            row_style = "background:#0e1117; color:#ccc;" if i % 2 == 0 else "background:#111827; color:#ccc;"
+            row_id = ""
+
+        td_style = ("padding:6px 14px; font-size:13.5px; border-bottom:1px solid #1f2937;"
+                    if is_actual else
+                    "padding:5px 12px; font-size:13px; border-bottom:1px solid #1f2937;")
+        cells = ""
+        for col, v in zip(render_df.columns, row):
+            if col == "Team":
+                logo_url = _NHL_LOGO_URL.format(team=v)
+                img_err = "this.style.display='none'"
+                cell_content = (
+                    f'<img src="{logo_url}" height="20" '
+                    f'style="vertical-align:middle;margin-right:6px" '
+                    f'onerror="{img_err}"> {v}'
+                )
+                cells += f'<td style="{td_style}">{cell_content}</td>'
+            else:
+                cells += f'<td style="{td_style}">{v}</td>'
+        rows_html += f'<tr style="{row_style}" {row_id}>{cells}</tr>\n'
+
+    # ── Visible height: context_window above + actual + context_window below ──
+    row_h   = 38
+    header  = 38
+    visible = context_window * 2 + 1
+    height  = header + visible * row_h
+
+    html = f"""
+<div id="wrap_{table_id}" style="overflow-y:auto; height:{height}px; border:1px solid #2d3748; border-radius:4px;">
+  <table id="{table_id}" style="width:100%; border-collapse:collapse; table-layout:auto;">
+    <thead><tr>{headers}</tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+</div>
+<script>
+  (function() {{
+    var wrap = document.getElementById("wrap_{table_id}");
+    var row  = document.getElementById("actual_row_{table_id}");
+    if (wrap && row) {{
+      // Scroll the container div internally — never touches page scroll position
+      wrap.scrollTop = row.offsetTop - (wrap.clientHeight / 2) + (row.offsetHeight / 2);
+    }}
+  }})();
+</script>
+"""
+    st.caption(
+        f"**{actual_team}** ranks **{rank_val} of {total}** — "
+        f"highlighted row is centred, scroll to see all teams."
+    )
+    st_components.html(html, height=height + 4, scrolling=False)
+
+
+def show_results_table(results, actual_team, context_window=5):
     display = results[[
         "player_team", "pred_game_score_per_game",
         "pred_points_per_game", "pred_goals_per_game", "is_actual"
     ]].copy()
-    display.columns = ["Team", "GS/GP", "Points/GP", "Goals/GP", "Actual Team"]
+    display.columns = ["Team", "GS/GP", "Points/GP", "Goals/GP", "_is_actual"]
     for col in ["GS/GP", "Points/GP", "Goals/GP"]:
         display[col] = display[col].round(3)
-    st.dataframe(
-        display.style.apply(
-            lambda row: ["background-color: #3a1a1a" if row["Actual Team"] else "" for _ in row],
-            axis=1,
-        ),
-        use_container_width=True, height=400,
+    display.insert(0, "Rank", range(1, len(display) + 1))
+
+    actual_idx = display.index[display["_is_actual"]].tolist()
+    rank_val   = int(display.loc[actual_idx[0], "Rank"]) if actual_idx else "?"
+
+    render = display.drop(columns=["_is_actual"]).reset_index(drop=True)
+    _render_scrollable_table(
+        render, display["_is_actual"].reset_index(drop=True),
+        actual_team, rank_val, len(display), context_window,
+        team_color=get_team_color(actual_team)
     )
     return display
 
@@ -829,6 +1400,99 @@ def calibration_slope(val_df, actual_col, pred_col):
 # ── 2025-26 Validation ─────────────────────────────────────────────────────────
 
 CURRENT_SEASON = "20252026"
+
+def _load_names_cache() -> dict:
+    """Load player_names.csv into {player_id: {name, headshot_b64}} dict."""
+    if os.path.exists(NAMES_FILE):
+        try:
+            ndf = pd.read_csv(NAMES_FILE, dtype={"player_id": int})
+            result = {}
+            for _, row in ndf.iterrows():
+                result[int(row["player_id"])] = {
+                    "name":         str(row.get("name", "")),
+                    "headshot_b64": str(row.get("headshot_b64", "")) if pd.notna(row.get("headshot_b64")) else "",
+                }
+            return result
+        except Exception:
+            pass
+    return {}
+
+
+def _save_names_cache(cache: dict) -> None:
+    """Persist {player_id: {name, headshot_b64}} to player_names.csv."""
+    try:
+        rows = pd.DataFrame([
+            {"player_id": pid, "name": v.get("name",""), "headshot_b64": v.get("headshot_b64","")}
+            for pid, v in cache.items()
+        ])
+        rows.to_csv(NAMES_FILE, index=False, encoding="utf-8")
+    except Exception:
+        pass
+
+
+# Module-level in-memory dict — loaded once per process, written back on new entries
+_NAMES_CACHE: dict = {}
+_NAMES_CACHE_LOADED: bool = False
+
+
+def _ensure_player_cached(player_id: int) -> None:
+    """Fetch name + headshot from NHL API and store in cache if not already present."""
+    global _NAMES_CACHE, _NAMES_CACHE_LOADED
+    if not _NAMES_CACHE_LOADED:
+        _NAMES_CACHE = _load_names_cache()
+        _NAMES_CACHE_LOADED = True
+
+    pid = int(player_id)
+    entry = _NAMES_CACHE.get(pid, {})
+
+    # Already have both name and headshot
+    if entry.get("name") and entry.get("headshot_b64"):
+        return
+
+    try:
+        url  = f"https://api-web.nhle.com/v1/player/{pid}/landing"
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
+        data  = resp.json()
+
+        first = data.get("firstName", {}).get("default", "")
+        last  = data.get("lastName",  {}).get("default", "")
+        name  = f"{first} {last}".strip()
+
+        # Fetch headshot from the URL in the API response
+        headshot_b64 = entry.get("headshot_b64", "")
+        hs_url = data.get("headshot", "")
+        if hs_url and not headshot_b64:
+            try:
+                hs_resp = requests.get(hs_url, timeout=8)
+                if hs_resp.status_code == 200:
+                    headshot_b64 = base64.b64encode(hs_resp.content).decode("utf-8")
+            except Exception:
+                headshot_b64 = ""
+
+        if name or headshot_b64:
+            _NAMES_CACHE[pid] = {
+                "name":         name or entry.get("name", ""),
+                "headshot_b64": headshot_b64,
+            }
+            _save_names_cache(_NAMES_CACHE)
+    except Exception:
+        pass
+
+
+def fetch_player_display_name(player_id: int) -> str:
+    """Return the correctly-spelled player name. Fetches from NHL API if needed."""
+    global _NAMES_CACHE, _NAMES_CACHE_LOADED
+    if not _NAMES_CACHE_LOADED:
+        _NAMES_CACHE = _load_names_cache()
+        _NAMES_CACHE_LOADED = True
+    pid = int(player_id)
+    if pid not in _NAMES_CACHE or not _NAMES_CACHE[pid].get("name"):
+        _ensure_player_cached(pid)
+    entry = _NAMES_CACHE.get(pid, {})
+    return entry.get("name") or None
+
+
 
 @st.cache_data(show_spinner=False)
 def fetch_nhl_current_season():
@@ -909,7 +1573,10 @@ def build_validation_results(actual_df, df, team_ctx, fit_models,
             if c not in pos_d.columns:
                 pos_d[c] = 0
 
-        feats  = PLAYER_FEATURES + (AGE_FEATURES if has_age else []) + TEAM_FEATURES
+        feats  = (PLAYER_FEATURES
+                  + (AGE_FEATURES       if has_age else [])
+                  + (NONLINEAR_FEATURES if has_age else [])
+                  + TEAM_FEATURES)
         feats  = [f for f in feats if f in pred_df.columns]
         X_pred = pd.concat(
             [pred_df[feats].reset_index(drop=True),
@@ -1260,12 +1927,11 @@ SLOT_COLORS = {
 }
 
 FWD_SLOT_MAP = {
-    1: "1st Line", 2: "1st Line",
-    3: "2nd Line", 4: "2nd Line",
-    5: "3rd Line", 6: "3rd Line",
-    7: "4th Line", 8: "4th Line",
-    9: "4th Line", 10: "4th Line",
-    11: "4th Line", 12: "4th Line",
+    # 3 forwards per line (C, LW, RW) across 4 lines = 12 forwards
+    1: "1st Line", 2: "1st Line",  3: "1st Line",
+    4: "2nd Line", 5: "2nd Line",  6: "2nd Line",
+    7: "3rd Line", 8: "3rd Line",  9: "3rd Line",
+    10: "4th Line", 11: "4th Line", 12: "4th Line",
 }
 
 DEF_SLOT_MAP = {
@@ -1391,7 +2057,7 @@ def build_player_insertion(player_id, team_code, df, team_ctx,
 @st.cache_data(show_spinner=False)
 def load_defensive_data():
     try:
-        df = pd.read_csv(DEF_FILE)
+        df = _safe_read_csv(DEF_FILE)
         df["season"] = df["season"].astype(int)
         return df, None
     except Exception as e:
@@ -1611,7 +2277,7 @@ def load_defensive_offensive_stats():
       - DataFrame: all D-men rows (most recent season per player) for live percentile ranking
     """
     try:
-        df = pd.read_csv(OFF_FILE)
+        df = _safe_read_csv(OFF_FILE)
         df = df[df["position"] == "D"].copy()
         df = df.sort_values("season", ascending=False)
         df = df.groupby("player_id").first().reset_index()
@@ -1912,6 +2578,28 @@ DEF_TRAJECTORY_FEATURES = [
     "career_year",
 ]
 
+# Non-linear career curve features for defensemen — included when age data is available.
+# Physical defensive skills (hits, takeaways) decline non-linearly with age,
+# and xGA suppression ability shifts across a defender's career arc.
+DEF_NONLINEAR_FEATURES = [
+    # Quadratic curve fit on prior seasons
+    "def_curve_accel_hits",               # a coeff — negative = normal physical decline arc
+    "def_curve_accel_takeaways",
+    "def_curve_accel_xga",
+    "def_curve_local_deriv_hits",         # 2a·age + b — positive = still improving
+    "def_curve_local_deriv_takeaways",
+    "def_curve_local_deriv_xga",
+    "def_seasons_from_est_peak_hits",     # negative = pre-peak, positive = post-peak
+    "def_seasons_from_est_peak_takeaways",
+    # Slope of pct-of-peak — approaching or receding from career ceiling
+    "def_pct_peak_hits_slope",
+    "def_pct_peak_takeaways_slope",
+    # Age × slope interactions — same hits slope means different things at 24 vs 33
+    "def_age_x_3yr_hits_slope",
+    "def_age_x_3yr_takeaways_slope",
+    "def_age_x_3yr_xga_slope",
+]
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def def_safe_div(a, b, fill=0.0):
@@ -2011,6 +2699,112 @@ def def_engineer_career_history(df):
     return d
 
 
+def def_engineer_nonlinear_trajectory_features(df):
+    """
+    Non-linear career curve features for the defensive model.
+    Mirrors engineer_nonlinear_trajectory_features for offensive model.
+    No-op if age data is absent or sparse.
+
+    Physical defensive skills (hits, takeaways, xGA suppression) follow
+    non-linear career arcs — defenders often peak physically in their
+    mid-to-late 20s and decline sharply through their 30s.
+    """
+    if "age" not in df.columns or df["age"].isna().mean() > 0.5:
+        return df
+
+    d = df.sort_values(["player_id", "season"]).copy()
+
+    # Targets for quadratic fitting
+    def_stats = {
+        "hits":      "ind_hits_pg",
+        "takeaways": "ind_takeaways_pg",
+        "xga":       "xg_against_per60_5v5",
+    }
+
+    new_cols = (
+        [f"def_curve_accel_{k}"               for k in def_stats] +
+        [f"def_curve_local_deriv_{k}"         for k in def_stats] +
+        ["def_seasons_from_est_peak_hits", "def_seasons_from_est_peak_takeaways"] +
+        ["def_pct_peak_hits_slope", "def_pct_peak_takeaways_slope",
+         "def_age_x_3yr_hits_slope", "def_age_x_3yr_takeaways_slope",
+         "def_age_x_3yr_xga_slope"]
+    )
+    for col in new_cols:
+        d[col] = np.nan
+
+    for pid, grp in d.groupby("player_id", sort=False):
+        idx      = grp.index
+        ages_arr = grp["age"].values
+
+        # ── Quadratic curve features ───────────────────────────────────────────
+        for k, stat_col in def_stats.items():
+            if stat_col not in grp.columns:
+                continue
+            vals_arr    = grp[stat_col].values
+            accel       = np.full(len(grp), np.nan)
+            local_deriv = np.full(len(grp), np.nan)
+            from_peak   = np.full(len(grp), np.nan)
+
+            for i in range(len(grp)):
+                prior_ages = ages_arr[:i]
+                prior_vals = vals_arr[:i]
+                mask = ~(np.isnan(prior_ages) | np.isnan(prior_vals))
+                pa, pv = prior_ages[mask], prior_vals[mask]
+                if len(pa) < 3:
+                    continue
+                try:
+                    a, b, _ = np.polyfit(pa, pv, 2)
+                except (np.linalg.LinAlgError, ValueError):
+                    continue
+                curr_age = ages_arr[i]
+                if np.isnan(curr_age):
+                    continue
+                accel[i]       = a
+                local_deriv[i] = 2.0 * a * curr_age + b
+                # Only store peak distance for physically-driven stats (not xGA)
+                if k in ("hits", "takeaways") and abs(a) > 1e-9:
+                    from_peak[i] = curr_age - (-b / (2.0 * a))
+
+            d.loc[idx, f"def_curve_accel_{k}"]       = accel
+            d.loc[idx, f"def_curve_local_deriv_{k}"] = local_deriv
+            if k in ("hits", "takeaways"):
+                d.loc[idx, f"def_seasons_from_est_peak_{k}"] = from_peak
+
+        # ── Slope of pct-of-peak for physical stats ────────────────────────────
+        for stat_short, peak_col in [
+            ("hits",      "pct_of_peak_hits"),
+            ("takeaways", "pct_of_peak_takeaways"),
+        ]:
+            if peak_col not in grp.columns:
+                continue
+            peak_vals = grp[peak_col].values
+            pct_slope = np.full(len(grp), np.nan)
+            for i in range(len(grp)):
+                window = peak_vals[max(0, i - 3):i]
+                mask   = ~np.isnan(window)
+                if mask.sum() < 2:
+                    continue
+                y = window[mask]
+                x = np.arange(len(window))[mask].astype(float)
+                xm, ym = x.mean(), y.mean()
+                denom  = ((x - xm) ** 2).sum()
+                pct_slope[i] = 0.0 if denom == 0 else float(
+                    ((x - xm) * (y - ym)).sum() / denom
+                )
+            d.loc[idx, f"def_pct_peak_{stat_short}_slope"] = pct_slope
+
+        # ── Age × slope interactions ───────────────────────────────────────────
+        for slope_col, out_col in [
+            ("recent_3yr_hits_slope",      "def_age_x_3yr_hits_slope"),
+            ("recent_3yr_takeaways_slope", "def_age_x_3yr_takeaways_slope"),
+            ("recent_3yr_xga_slope",       "def_age_x_3yr_xga_slope"),
+        ]:
+            if slope_col in grp.columns:
+                d.loc[idx, out_col] = ages_arr * grp[slope_col].values
+
+    return d
+
+
 def def_build_team_context(df):
     """Aggregate team-level defensive context per season."""
     team_ctx = (
@@ -2051,7 +2845,10 @@ def def_build_player_profile(player_rows):
 
 
 def def_build_feature_matrix(df, has_age):
-    feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + DEF_TEAM_FEATURES
+    feats = (DEF_PLAYER_FEATURES
+             + (DEF_AGE_FEATURES        if has_age else [])
+             + (DEF_NONLINEAR_FEATURES  if has_age else [])
+             + DEF_TEAM_FEATURES)
     feats = [f for f in feats if f in df.columns]
     X     = df[feats].copy()
     return X.replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -2059,7 +2856,10 @@ def def_build_feature_matrix(df, has_age):
 
 def def_build_next_feature_matrix(df, has_age):
     traj  = [f for f in DEF_TRAJECTORY_FEATURES if f in df.columns]
-    feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + traj + DEF_TEAM_FEATURES
+    feats = (DEF_PLAYER_FEATURES
+             + (DEF_AGE_FEATURES        if has_age else [])
+             + (DEF_NONLINEAR_FEATURES  if has_age else [])
+             + traj + DEF_TEAM_FEATURES)
     feats = [f for f in feats if f in df.columns]
     X     = df[feats].copy()
     return X.replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -2151,7 +2951,7 @@ def def_load_and_train(def_path, ages_path):
 
     # Load
     status.markdown("⚙️ **Loading defensive data...**")
-    df = pd.read_csv(def_path)
+    df = _safe_read_csv(def_path)
     df = df[df["games_played"] >= MIN_GP].copy()
 
     ages = _load_ages(ages_path)
@@ -2163,6 +2963,7 @@ def def_load_and_train(def_path, ages_path):
     status.markdown("⚙️ **Engineering features...**")
     df       = def_engineer_features(df)
     df       = def_engineer_career_history(df)
+    df       = def_engineer_nonlinear_trajectory_features(df)   # non-linear curve signals
     # pim_pg is the model target name — alias from the source column
     df["pim_pg"] = df["ind_penalty_minutes_pg"]
     team_ctx = def_build_team_context(df)
@@ -2231,11 +3032,12 @@ def def_predict_for_team(profile, team_row, models, has_age, use_traj=False,
                 pred_df[f] = 0.0
         feats = feature_names
     else:
+        nl = DEF_NONLINEAR_FEATURES if has_age else []
         if use_traj:
             traj  = [f for f in DEF_TRAJECTORY_FEATURES if f in pred_df.columns]
-            feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + traj + DEF_TEAM_FEATURES
+            feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + nl + traj + DEF_TEAM_FEATURES
         else:
-            feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + DEF_TEAM_FEATURES
+            feats = DEF_PLAYER_FEATURES + (DEF_AGE_FEATURES if has_age else []) + nl + DEF_TEAM_FEATURES
         feats = [f for f in feats if f in pred_df.columns]
 
     X = pred_df[feats].replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -2365,7 +3167,8 @@ def def_predict_defenseman(player_name, df, team_ctx, fit_models, next_models,
     pid              = rows["player_id"].iloc[0]
     profile, seasons = player_profiles[pid]
     actual_team      = profile["player_team"]
-    matched          = profile["player_name"]
+    _api_name        = fetch_player_display_name(int(pid))
+    matched          = _api_name if _api_name else profile["player_name"]
 
     all_teams = def_get_latest_team_contexts(df, team_ctx)
 
@@ -2891,39 +3694,80 @@ def def_build_pairing_insertion(player_id, team_code, df, team_ctx,
 # ── Charts ─────────────────────────────────────────────────────────────────────
 
 def def_make_bar_chart(results, player_name, actual_team, title):
+    """
+    Interactive Plotly bar chart for defensive stats.
+    Lower-is-better axes are inverted. Fullscreen icon (⛶) to expand.
+    """
     metric_cols   = ["ind_hits_pg", "ind_takeaways_pg",
                      "xg_against_per60_5v5", "pim_pg", "defensive_score"]
     metric_labels = ["Hits / Game", "Takeaways / Game",
-                     "xGA Against / 60", "PIM / Game", "Defensive Score"]
+                     "xGA / 60 (↓ better)", "PIM / Game (↓ better)", "Def Score"]
 
-    fig, axes = plt.subplots(1, 5, figsize=(28, 8))
-    fig.patch.set_facecolor("#0e1117")
-    fig.suptitle(title, color="white", fontsize=13, y=1.01)
+    fig = make_subplots(rows=1, cols=5, subplot_titles=metric_labels,
+                        horizontal_spacing=0.06)
 
-    for ax, col, label in zip(axes, metric_cols, metric_labels):
-        ax.set_facecolor("#0e1117")
-        sr         = results.sort_values(col, ascending=(col in DEF_LOWER_IS_BETTER))
-        bar_colors = ["#FFD700" if t == actual_team else "#4a90d9"
-                      for t in sr["player_team"]]
-        ax.barh(sr["player_team"], sr[col], color=bar_colors)
-        actual_val = results.loc[results["player_team"] == actual_team, col].values[0]
-        ax.axvline(actual_val, color="#c8102e", linestyle="--", linewidth=1.2)
-        ax.set_xlabel(label, color="white", fontsize=9)
-        ax.tick_params(colors="white", labelsize=7)
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#333")
-        if col in DEF_LOWER_IS_BETTER:
-            ax.invert_xaxis()
+    for col_idx, (col, label) in enumerate(zip(metric_cols, metric_labels), start=1):
+        lower_better = col in DEF_LOWER_IS_BETTER
+        sr     = results.sort_values(col, ascending=lower_better)
+        team_primary   = get_team_color(actual_team, "primary")
+        team_secondary = get_team_color(actual_team, "secondary")
+        colors = [team_primary if t == actual_team else "#4a90d9" for t in sr["player_team"]]
+        vals   = sr[col].values
 
-    actual_patch = mpatches.Patch(color="#FFD700", label=f"Actual team ({actual_team})")
-    other_patch  = mpatches.Patch(color="#4a90d9", label="Other teams")
-    axes[-1].legend(handles=[actual_patch, other_patch],
-                    facecolor="#1a1a2e", labelcolor="white", loc="lower right", fontsize=8)
-    plt.tight_layout()
+        fig.add_trace(
+            go.Bar(
+                x=vals,
+                y=sr["player_team"],
+                orientation="h",
+                marker_color=colors,
+                marker_line_color=[team_secondary if t == actual_team else "#4a90d9"
+                                   for t in sr["player_team"]],
+                marker_line_width=[2 if t == actual_team else 0 for t in sr["player_team"]],
+                hovertemplate="%{y}: %{x:.3f}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1, col=col_idx,
+        )
+
+        actual_val = float(results.loc[results["player_team"] == actual_team, col].values[0])
+        fig.add_vline(
+            x=actual_val, line_color=team_primary, line_dash="dash", line_width=2,
+            row=1, col=col_idx,
+        )
+
+        spread = vals.max() - vals.min()
+        pad    = max(spread * 0.1, vals.max() * 0.005)
+        x_range = [vals.min() - pad, vals.max() + pad]
+        if lower_better:
+            x_range = x_range[::-1]  # invert for lower-is-better
+
+        fig.update_xaxes(
+            range=x_range, row=1, col=col_idx,
+            gridcolor="#2d3748", zerolinecolor="#2d3748",
+            tickfont=dict(color="#aaa", size=8),
+        )
+        fig.update_yaxes(
+            row=1, col=col_idx,
+            tickfont=dict(color="#aaa", size=8),
+            gridcolor="#2d3748",
+        )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(color="white", size=12)),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        height=700,
+        margin=dict(l=60, r=20, t=60, b=40),
+        font=dict(color="white"),
+    )
+    for ann in fig.layout.annotations:
+        ann.font.color = "white"
+        ann.font.size  = 11
+
     return fig
 
 
-def def_show_results_table(results, actual_team):
+def def_show_results_table(results, actual_team, context_window=5):
     display = results[[
         "player_team", "ind_hits_pg", "ind_takeaways_pg",
         "xg_against_per60_5v5", "pim_pg",
@@ -2931,16 +3775,20 @@ def def_show_results_table(results, actual_team):
     ]].copy()
     display.columns = [
         "Team", "Hits/GP", "TK/GP", "xGA/60",
-        "PEN/GP", "Def Score", "Actual Team"
+        "PEN/GP", "Def Score", "_is_actual"
     ]
     for col in ["Hits/GP", "TK/GP", "xGA/60", "PEN/GP", "Def Score"]:
         display[col] = display[col].round(3)
-    st.dataframe(
-        display.style.apply(
-            lambda row: ["background-color: #3a1a1a" if row["Actual Team"] else "" for _ in row],
-            axis=1,
-        ),
-        use_container_width=True, height=400,
+    display.insert(0, "Rank", range(1, len(display) + 1))
+
+    actual_idx = display.index[display["_is_actual"]].tolist()
+    rank_val   = int(display.loc[actual_idx[0], "Rank"]) if actual_idx else "?"
+
+    render = display.drop(columns=["_is_actual"]).reset_index(drop=True)
+    _render_scrollable_table(
+        render, display["_is_actual"].reset_index(drop=True),
+        actual_team, rank_val, len(display), context_window,
+        team_color=get_team_color(actual_team)
     )
     return display
 
