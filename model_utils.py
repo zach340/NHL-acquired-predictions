@@ -97,7 +97,7 @@ TEAM_COLORS = {
     "EDM": {"primary": "#FC4C02", "secondary": "#041E42"},
     "FLA": {"primary": "#C8102E", "secondary": "#041E42"},
     "LAK": {"primary": "#A2AAAD", "secondary": "#111111"},
-    "MIN": {"primary": "#A6192E", "secondary": "#154734"},
+    "MIN": {"primary": "#154734", "secondary": "#A6192E"},
     "MTL": {"primary": "#AF1E2D", "secondary": "#192168"},
     "NJD": {"primary": "#CE1126", "secondary": "#003087"},
     "NSH": {"primary": "#FFB81C", "secondary": "#041E42"},

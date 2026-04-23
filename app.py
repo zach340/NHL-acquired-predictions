@@ -8,7 +8,21 @@ Run with:  python -m streamlit run app.py
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from model_utils import *
+
+# ── Module-level callbacks — must be defined before any widgets ─────────────
+def _on_insertion_team_change():
+    st.session_state["active_team"]   = st.session_state.get("insertion_team")
+    st.session_state["_team_override"] = True
+
+def _on_pair_team_change():
+    st.session_state["active_team"]   = st.session_state.get("pair_team_sel")
+    st.session_state["_team_override"] = True
+
+def _on_contract_team_change():
+    st.session_state["active_team"]   = st.session_state.get("contract_team")
+    st.session_state["_team_override"] = True
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
@@ -207,6 +221,201 @@ with tab_app:
         "Validation",
     ])
 
+    # ── Interactive spotlight tour ────────────────────────────────────────────────
+    # The button lives inside a components.html iframe (so JS executes).
+    # On click it injects the overlay nodes into window.parent.document,
+    # then queries window.parent.document for all tab elements.
+    _TOUR_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: transparent; display: flex; align-items: center; justify-content: center; height: 60px; }
+  #launch-btn {
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    color: #fff; border: none; padding: 11px 22px; border-radius: 50px;
+    cursor: pointer; font-size: 14px; font-weight: 700; letter-spacing: .3px;
+    box-shadow: 0 4px 18px rgba(59,130,246,.5);
+    transition: transform .15s, box-shadow .15s;
+  }
+  #launch-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(59,130,246,.6); }
+</style>
+</head>
+<body>
+  <button id="launch-btn" onclick="initAndStart()">&#x1F5FA;&#xFE0F;&nbsp; Tour the App</button>
+<script>
+var P = window.parent;
+var D = P.document;
+var curr = 0;
+
+var STEPS = [
+  { find: function(){ return tabByText('NHL Predictor'); },
+    title: 'Welcome &#x1F3D2;',
+    text: "Everything lives inside the NHL Predictor tab. Let's walk through each section so you know exactly where to look.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Offensive'); },
+    title: 'Offensive Tab &#x2694;&#xFE0F;',
+    text: "Your starting point for any NHL forward. Search a player and get instant predictions across all 32 teams.",
+    pos: 'below' },
+  { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+    title: 'Player Search &#x1F50D;',
+    text: "Type any part of a forward's name here &#x2014; partial names work. The dropdown auto-completes.",
+    pos: 'right' },
+  { find: function(){ return subTabByText('Team Fit'); },
+    title: 'Team Fit &#x1F4CA;',
+    text: "Ranks all 32 NHL teams by predicted fit &#x2014; Points/GP, Goals/GP, and Game Score. Gold = best fit.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Next Season'); },
+    title: 'Next Season &#x1F4C8;',
+    text: "Projects the player into the following season, adjusted for age curves and ascending/descending trajectory.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Roster Insertion'); },
+    title: 'Roster Insertion &#x1F4CB;',
+    text: "See exactly where the player slots into any team's lineup and which players get pushed down.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Defensive'); },
+    title: 'Defensive Tab &#x1F6E1;&#xFE0F;',
+    text: "Switch here for defensemen. Includes auto-classification (Defensive/Offensive/Two-Way D) and a Pairing tool.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Contract Evaluator'); },
+    title: 'Contract Evaluator &#x1F4C4;',
+    text: "Project any player over 1&#x2013;8 seasons using NHL age curves. Works for forwards and defensemen.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Models'); },
+    title: 'Models Tab &#x1F52C;',
+    text: "Review MAE, RMSE and elite-player error from cross-validation to calibrate how much to trust any prediction.",
+    pos: 'below' },
+  { find: function(){ return subTabByText('Validation'); },
+    title: 'Validation Tab &#x2705;',
+    text: "Back-test predictions against seasons with known outcomes to build confidence in the model.",
+    pos: 'below' }
+];
+
+function tabByText(t) {
+  return Array.from(D.querySelectorAll('button[role="tab"]'))
+    .find(function(b){ return b.textContent.includes(t); });
+}
+function subTabByText(t) {
+  var all = Array.from(D.querySelectorAll('button[role="tab"]'));
+  return all.find(function(b){ return b.textContent.trim() === t; })
+      || all.find(function(b){ return b.textContent.includes(t); });
+}
+
+function initAndStart() {
+  // Inject overlay elements into parent document once
+  if (!D.getElementById('tc-backdrop')) {
+    var style = D.createElement('style');
+    style.id = 'tc-style';
+    style.textContent =
+      '#tc-backdrop{position:fixed;inset:0;z-index:99998;display:none;}' +
+      '#tc-spot{position:fixed;z-index:99999;pointer-events:none;display:none;' +
+        'border-radius:8px;outline:3px solid #60a5fa;outline-offset:4px;' +
+        'box-shadow:0 0 0 9999px rgba(0,0,0,.75);' +
+        'transition:top .3s,left .3s,width .3s,height .3s;}' +
+      '#tc-card{position:fixed;z-index:100000;display:none;width:340px;' +
+        'background:#0f172a;border:1px solid #1e40af;border-radius:14px;' +
+        'padding:20px 22px;color:#f1f5f9;' +
+        'box-shadow:0 16px 48px rgba(0,0,0,.7);' +
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+        'transition:top .3s,left .3s;}' +
+      '#tc-card .lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;}' +
+      '#tc-card h3{margin:0 0 8px;font-size:15px;color:#93c5fd;font-weight:700;}' +
+      '#tc-card p{margin:0 0 16px;font-size:13.5px;line-height:1.6;color:#cbd5e1;}' +
+      '#tc-card .prog{display:flex;gap:4px;margin-bottom:14px;}' +
+      '.tc-dot{height:4px;border-radius:2px;flex:1;background:#1e293b;transition:background .25s;}' +
+      '.tc-dot.on{background:#3b82f6;}.tc-dot.dn{background:#1d4ed8;}' +
+      '#tc-card .btns{display:flex;gap:8px;justify-content:flex-end;align-items:center;}' +
+      '.tb{padding:7px 15px;border-radius:7px;border:none;cursor:pointer;font-size:13px;font-weight:600;}' +
+      '.tx{background:transparent;color:#64748b;border:1px solid #334155 !important;}' +
+      '.tp{background:#1e293b;color:#cbd5e1;}.tp:hover{background:#334155;}' +
+      '.tn{background:#3b82f6;color:#fff;}.tn:hover{background:#2563eb;}';
+    D.head.appendChild(style);
+
+    var bd = D.createElement('div'); bd.id = 'tc-backdrop'; D.body.appendChild(bd);
+    var sp = D.createElement('div'); sp.id = 'tc-spot';     D.body.appendChild(sp);
+    var cd = D.createElement('div'); cd.id = 'tc-card';     D.body.appendChild(cd);
+    D.getElementById('tc-backdrop').addEventListener('click', exitTour);
+  }
+  curr = 0;
+  D.getElementById('tc-backdrop').style.display = 'block';
+  showStep(0);
+}
+
+function showStep(i) {
+  var el = STEPS[i].find();
+  if (!el) {
+    if (i < STEPS.length - 1) { curr = i + 1; showStep(curr); } else exitTour();
+    return;
+  }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setTimeout(function(){ renderStep(el, STEPS[i], i); }, 380);
+}
+
+function renderStep(el, step, i) {
+  var PAD = 8;
+  var r = el.getBoundingClientRect();
+  var W = P.innerWidth, H = P.innerHeight;
+
+  var sp = D.getElementById('tc-spot');
+  sp.style.display = 'block';
+  sp.style.top    = (r.top    - PAD) + 'px';
+  sp.style.left   = (r.left   - PAD) + 'px';
+  sp.style.width  = (r.width  + PAD * 2) + 'px';
+  sp.style.height = (r.height + PAD * 2) + 'px';
+
+  var CW = 340, CH = 250;
+  var top, left;
+  if (step.pos === 'below') {
+    top  = r.bottom + PAD + 12;
+    left = Math.min(r.left, W - CW - 12);
+  } else {
+    top  = r.top;
+    left = r.right + 16;
+    if (left + CW > W) left = r.left - CW - 16;
+  }
+  top  = Math.max(8, Math.min(top,  H - CH - 8));
+  left = Math.max(8, Math.min(left, W - CW - 8));
+
+  var dots = STEPS.map(function(_, x){
+    return '<div class="tc-dot ' + (x < i ? 'dn' : x === i ? 'on' : '') + '"></div>';
+  }).join('');
+
+  var isLast = (i === STEPS.length - 1);
+  var cd = D.getElementById('tc-card');
+  cd.style.display = 'block';
+  cd.style.top  = top  + 'px';
+  cd.style.left = left + 'px';
+  cd.innerHTML =
+    '<div class="lbl">Step ' + (i+1) + ' of ' + STEPS.length + '</div>' +
+    '<div class="prog">' + dots + '</div>' +
+    '<h3>' + step.title + '</h3>' +
+    '<p>'  + step.text  + '</p>' +
+    '<div class="btns">' +
+      '<button class="tb tx" id="tc-x">&#x2715; Exit</button>' +
+      (i > 0 ? '<button class="tb tp" id="tc-p">&#x2190; Back</button>' : '') +
+      '<button class="tb tn" id="tc-n">' + (isLast ? '&#x1F389; Done' : 'Next &#x2192;') + '</button>' +
+    '</div>';
+
+  D.getElementById('tc-x').onclick = exitTour;
+  D.getElementById('tc-n').onclick = function(){ isLast ? exitTour() : (curr++ , showStep(curr)); };
+  var pb = D.getElementById('tc-p');
+  if (pb) pb.onclick = function(){ curr--; showStep(curr); };
+}
+
+function exitTour() {
+  D.getElementById('tc-backdrop').style.display = 'none';
+  D.getElementById('tc-spot').style.display     = 'none';
+  D.getElementById('tc-card').style.display     = 'none';
+}
+</script>
+</body>
+</html>
+"""
+    components.html(_TOUR_HTML, height=60)
+
+
+
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
         st.caption("Search for a forward to see offensive predictions.")
@@ -249,8 +458,16 @@ with tab_app:
                 pred = first
             if pred:
                 st.session_state["shared_pred"] = pred
-                st.session_state["active_team"] = pred.get("actual_team")
-                apply_team_theme(pred.get("actual_team"))  # apply immediately this run
+                # New player → reset all tab-team overrides
+                if st.session_state.get("_active_pid") != pred.get("pid"):
+                    st.session_state["_active_pid"]    = pred.get("pid")
+                    st.session_state["_team_override"] = False
+                    for _k in ("insertion_team", "pair_team_sel", "contract_team"):
+                        st.session_state.pop(_k, None)
+                # Only apply player's team if no tab override is active
+                if not st.session_state.get("_team_override"):
+                    st.session_state["active_team"] = pred.get("actual_team")
+                    apply_team_theme(pred.get("actual_team"))
 
         off_t1, off_t2, off_t3 = st.tabs(["Team Fit", "Next Season", "Roster Insertion"])
 
@@ -420,7 +637,8 @@ with tab_app:
                     "Select team to insert player into",
                     options=NHL_TEAMS,
                     index=NHL_TEAMS.index(pred["actual_team"]) if pred["actual_team"] in NHL_TEAMS else 0,
-                    key="insertion_team"
+                    key="insertion_team",
+                    on_change=_on_insertion_team_change
                 )
                 if c2.button("Refresh roster"):
                     fetch_active_team_roster.clear()
@@ -506,8 +724,15 @@ with tab_app:
                     "age":          None,
                 }
                 st.session_state["shared_pred"] = def_pred_input
-                st.session_state["active_team"] = def_pred_input.get("actual_team")
-                apply_team_theme(def_pred_input.get("actual_team"))  # apply immediately this run
+                if st.session_state.get("_active_pid") != def_pred_input.get("pid"):
+                    st.session_state["_active_pid"]    = def_pred_input.get("pid")
+                    st.session_state["_team_override"] = False
+                    for _k in ("insertion_team", "pair_team_sel", "contract_team"):
+                        st.session_state.pop(_k, None)
+                if not st.session_state.get("_team_override"):
+                    st.session_state["active_team"] = def_pred_input.get("actual_team")
+                    apply_team_theme(def_pred_input.get("actual_team"))
+
 
                 _dpred_key = f"dpred_{def_first['pid']}"
                 if _dpred_key not in st.session_state:
@@ -647,7 +872,8 @@ with tab_app:
                     "Select team",
                     options=NHL_TEAMS,
                     index=NHL_TEAMS.index(dpred["actual_team"]) if dpred["actual_team"] in NHL_TEAMS else 0,
-                    key="pair_team_sel"
+                    key="pair_team_sel",
+                    on_change=_on_pair_team_change
                 )
                 if pc2.button("Refresh roster & shifts", key="pair_refresh"):
                     def_fetch_team_roster_d.clear()
@@ -861,8 +1087,14 @@ with tab_app:
                 else:
                     pred = first_c
                 if pred:
-                    st.session_state["active_team"] = pred.get("actual_team")
-                    apply_team_theme(pred.get("actual_team"))  # apply immediately this run
+                    if st.session_state.get("_active_pid") != pred.get("pid"):
+                        st.session_state["_active_pid"]    = pred.get("pid")
+                        st.session_state["_team_override"] = False
+                        for _k in ("insertion_team", "pair_team_sel", "contract_team"):
+                            st.session_state.pop(_k, None)
+                    if not st.session_state.get("_team_override"):
+                        st.session_state["active_team"] = pred.get("actual_team")
+                        apply_team_theme(pred.get("actual_team"))
             elif def_models_loaded:
                 def_c = def_predict_defenseman(
                     contract_input, def_df, def_team_ctx,
@@ -894,7 +1126,8 @@ with tab_app:
                 "Team signing the player",
                 options=NHL_TEAMS,
                 index=NHL_TEAMS.index(pred["actual_team"]) if pred["actual_team"] in NHL_TEAMS else 0,
-                key="contract_team"
+                key="contract_team",
+                on_change=_on_contract_team_change
             )
             # Resolve current age — always try ages CSV first so season offset is applied
             _pid = pred.get("pid")
