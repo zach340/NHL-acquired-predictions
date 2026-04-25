@@ -222,75 +222,244 @@ with tab_app:
     ])
 
     # ── Interactive spotlight tour ────────────────────────────────────────────────
-    # The button lives inside a components.html iframe (so JS executes).
-    # On click it injects the overlay nodes into window.parent.document,
-    # then queries window.parent.document for all tab elements.
+    # iframe height=0 — invisible. Script immediately injects the fixed button
+    # and all overlay divs into window.parent.document.body so nothing appears
+    # in the page scroll flow.
     _TOUR_HTML = """
 <!DOCTYPE html>
 <html>
-<head>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: transparent; display: flex; align-items: center; justify-content: center; height: 60px; }
-  #launch-btn {
-    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-    color: #fff; border: none; padding: 11px 22px; border-radius: 50px;
-    cursor: pointer; font-size: 14px; font-weight: 700; letter-spacing: .3px;
-    box-shadow: 0 4px 18px rgba(59,130,246,.5);
-    transition: transform .15s, box-shadow .15s;
-  }
-  #launch-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(59,130,246,.6); }
-</style>
-</head>
+<head><style>body{margin:0;background:transparent;}</style></head>
 <body>
-  <button id="launch-btn" onclick="initAndStart()">&#x1F5FA;&#xFE0F;&nbsp; Tour the App</button>
 <script>
+(function(){
 var P = window.parent;
 var D = P.document;
 var curr = 0;
+var waitPoll = null;
 
-var STEPS = [
+if (D.getElementById('tc-btn')) return; // already injected on re-render
+
+var style = D.createElement('style');
+style.textContent =
+  '#tc-btn{position:fixed;bottom:24px;right:24px;z-index:99997;' +
+    'background:linear-gradient(135deg,#3b82f6,#1d4ed8);' +
+    'color:#fff;border:none;padding:11px 22px;border-radius:50px;' +
+    'cursor:pointer;font-size:14px;font-weight:700;letter-spacing:.3px;' +
+    'box-shadow:0 4px 18px rgba(59,130,246,.5);' +
+    'transition:transform .15s,box-shadow .15s;}' +
+  '#tc-btn:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(59,130,246,.6);}' +
+  '#tc-backdrop{position:fixed;inset:0;z-index:99998;display:none;pointer-events:none;}' +
+  '#tc-spot{position:fixed;z-index:99999;pointer-events:none;display:none;' +
+    'border-radius:8px;outline:3px solid #60a5fa;outline-offset:4px;' +
+    'box-shadow:0 0 0 9999px rgba(0,0,0,.75);' +
+    'transition:top .3s,left .3s,width .3s,height .3s;}' +
+  '#tc-card{position:fixed;z-index:100000;display:none;width:340px;' +
+    'background:#0f172a;border:1px solid #1e40af;border-radius:14px;' +
+    'padding:20px 22px;color:#f1f5f9;' +
+    'box-shadow:0 16px 48px rgba(0,0,0,.7);' +
+    'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+    'transition:top .3s,left .3s;}' +
+  '#tc-card .lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;}' +
+  '#tc-card h3{margin:0 0 8px;font-size:15px;color:#93c5fd;font-weight:700;}' +
+  '#tc-card p{margin:0 0 16px;font-size:13.5px;line-height:1.6;color:#cbd5e1;}' +
+  '#tc-card .prog{display:flex;gap:4px;margin-bottom:14px;}' +
+  '.tc-dot{height:4px;border-radius:2px;flex:1;background:#1e293b;transition:background .25s;}' +
+  '.tc-dot.on{background:#3b82f6;}.tc-dot.dn{background:#1d4ed8;}' +
+  '#tc-card .btns{display:flex;gap:8px;justify-content:flex-end;align-items:center;}' +
+  '.tb{padding:7px 15px;border-radius:7px;border:none;cursor:pointer;font-size:13px;font-weight:600;}' +
+  '.tx{background:transparent;color:#64748b;border:1px solid #334155 !important;}' +
+  '.tp{background:#1e293b;color:#cbd5e1;}.tp:hover{background:#334155;}' +
+  '.tn{background:#3b82f6;color:#fff;}.tn:hover{background:#2563eb;}';
+D.head.appendChild(style);
+
+var btn = D.createElement('button');
+btn.id = 'tc-btn';
+btn.innerHTML = '&#x1F5FA;&#xFE0F;&nbsp; Tour the App';
+btn.onclick = initAndStart;
+D.body.appendChild(btn);
+
+var bd = D.createElement('div'); bd.id = 'tc-backdrop'; D.body.appendChild(bd);
+var sp = D.createElement('div'); sp.id = 'tc-spot';     D.body.appendChild(sp);
+var cd = D.createElement('div'); cd.id = 'tc-card';     D.body.appendChild(cd);
+// backdrop is pointer-events:none so user can interact with the page freely
+// Press Escape or use the Exit button to end the tour
+
+// ── Per-tab step sets ────────────────────────────────────────────────────────
+var ALL_TOURS = {
+
+  'Offensive': [
+    { find: function(){ return subTabByText('Offensive'); },
+      title: 'Offensive Tab &#x2694;&#xFE0F;',
+      text: "This is your hub for evaluating NHL forwards. Everything here is powered by a LightGBM model trained on MoneyPuck shot-tracking data.",
+      pos: 'below' },
+    { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+      title: 'Player Search &#x1F50D;',
+      text: "Type any part of a forward's name &#x2014; partial names work fine. The dropdown auto-completes from the full player database.",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Team Fit'); },
+      title: 'Team Fit &#x1F4CA;',
+      text: "Ranks all 32 NHL teams by how well they'd fit this forward right now &#x2014; showing predicted Points/GP, Goals/GP, and Game Score. Gold = best fit.",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Next Season'); },
+      title: 'Next Season &#x1F4C8;',
+      text: "Projects the forward's production into next season using empirical age curves and trajectory signals (rising vs. declining).",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Roster Insertion'); },
+      title: 'Roster Insertion &#x1F4CB;',
+      text: "Pick any NHL team to see exactly where this forward slots into the lineup &#x2014; 1st through 4th line &#x2014; and which players get pushed down. A CSV download is available at the bottom.",
+      pos: 'below' }
+  ],
+
+  'Defensive': [
+    { find: function(){ return subTabByText('Defensive'); },
+      title: 'Defensive Tab &#x1F6E1;&#xFE0F;',
+      text: "This is your hub for evaluating NHL defensemen. The model automatically classifies each D-man as Defensive D, Offensive D, or Two-Way D.",
+      pos: 'below' },
+    { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+      title: 'Defenseman Search &#x1F50D;',
+      text: "Type any part of a defenseman's name here. Once selected, the player's archetype and stat grades appear automatically.",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Team Fit'); },
+      title: 'Team Fit &#x1F4CA;',
+      text: "Shows defensive grade (hits, takeaways, xGA, PIM) and offensive grade across all 32 teams. Use this to find the best organizational fit.",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Next Season'); },
+      title: 'Next Season &#x1F4C8;',
+      text: "Multi-year defensive forecast using age curves specific to defensemen, who peak and decline on a different timeline than forwards.",
+      pos: 'below' },
+    { find: function(){ return subTabByText('Pairing'); },
+      title: 'Pairing Tool &#x1F91D;',
+      text: "Pick any NHL team to see the full defensive depth chart after inserting this player. Pairs are anchored by real shift data. A &#x1F91D; icon means opposite-hand pairing &#x2014; generally preferred by coaches. Download the full chart as a CSV.",
+      pos: 'below' }
+  ],
+
+  'Contract Evaluator': [
+    { find: function(){ return subTabByText('Contract Evaluator'); },
+      title: 'Contract Evaluator &#x1F4C4;',
+      text: "Projects a player's production across multiple seasons using empirical NHL age curves. Works for both forwards and defensemen.",
+      pos: 'below' },
+    { find: function(){
+        // Find the visible "Search for a player" label's parent container
+        var label = Array.from(D.querySelectorAll('label')).find(function(l){
+          return l.textContent.trim().toLowerCase().includes('search for a player');
+        });
+        if (label && label.parentElement) return label.parentElement;
+        // Fallback: first selectbox container
+        return D.querySelector('[data-testid="stSelectbox"]')
+            || D.querySelector('.stSelectbox');
+      },
+      title: 'Search for a Player &#x1F50D;',
+      text: "Type any forward or defenseman's name and select them from the dropdown.",
+      pos: 'below',
+      waitFor: function(){
+        // Only fire once elements that ONLY appear after player selection exist.
+        // A slider (contract length) is the most reliable signal.
+        if (D.querySelector('input[type="range"]')) return true;
+        if (D.querySelector('[data-testid="stSlider"]')) return true;
+        if (D.querySelector('.stSlider')) return true;
+        return false;
+      },
+      waitMsg: "&#x23F3; Select a player above to continue the tour…"
+    },
+    { find: function(){
+        var H = P.innerHeight;
+        var candidates = Array.from(D.querySelectorAll(
+          '[data-baseweb="select"], [data-testid="stSelectbox"], .stSelectbox'
+        ));
+        // First find the player search box (the one containing the selected player name)
+        var playerBox = candidates.find(function(el) {
+          var r = el.getBoundingClientRect();
+          return r.width > 30 && r.height > 10 && r.top >= 0 && r.bottom <= H;
+        });
+        if (!playerBox) return null;
+        var playerBottom = playerBox.getBoundingClientRect().bottom;
+        // Return the first visible select that starts BELOW the player search box
+        return candidates.find(function(el) {
+          if (el === playerBox) return false;
+          var r = el.getBoundingClientRect();
+          return r.width > 30 && r.height > 10 && r.top > playerBottom && r.bottom <= H + 200;
+        }) || null;
+      },
+      title: 'Team Selection &#x1F3D2;',
+      text: "Pick the team you want to evaluate the contract for. The model adjusts its projection based on that team's playing style and deployment tendencies.",
+      pos: 'below' },
+    { find: function(){
+        return D.querySelector('input[type="range"]')
+            || D.querySelector('.stSlider')
+            || D.querySelector('[data-testid="stSlider"]')
+            || D.querySelector('.stNumberInput');
+      },
+      title: 'Contract Length &#x1F4C5;',
+      text: "Set how many years to project &#x2014; from 1 to 8 seasons. The model applies NHL age curves to each year so you can see when production is expected to peak or decline.",
+      pos: 'below' },
+    { find: function(){
+        return D.querySelector('.js-plotly-plot')
+            || D.querySelector('[data-testid="stVegaLiteChart"]')
+            || D.querySelector('.stDataFrame')
+            || D.querySelector('[data-testid="stArrowDataFrame"]')
+            || D.querySelector('[data-testid="stTable"]');
+      },
+      title: 'Production Projection &#x1F4C8;',
+      text: "The projection shows predicted output for each season of the deal. Confidence bands widen in later years &#x2014; treat years 4+ as a range, not a precise number.",
+      pos: 'below' }
+  ],
+
+  'Models': [
+    { find: function(){ return subTabByText('Models'); },
+      title: 'Models Tab &#x1F52C;',
+      text: "See exactly how well the prediction models perform before trusting any output.",
+      pos: 'below' },
+    { find: function(){ return D.querySelector('.stMetric') || D.querySelector('[data-testid="metric-container"]'); },
+      title: 'Accuracy Metrics &#x1F4CF;',
+      text: "MAE and RMSE are shown for Points/GP, Goals/GP, and Game Score/GP &#x2014; measured via 3-fold cross-validation on held-out seasons. Lower is better.",
+      pos: 'below' },
+    { find: function(){ return D.querySelector('.js-plotly-plot') || D.querySelector('[data-testid="stVegaLiteChart"]'); },
+      title: 'Feature Importance &#x1F4CA;',
+      text: "Shows which variables drive predictions most &#x2014; e.g. high-danger shot share, age &#xD7; finishing skill. Use this to understand what the model is actually learning.",
+      pos: 'below' }
+  ],
+
+  'Validation': [
+    { find: function(){ return subTabByText('Validation'); },
+      title: 'Validation Tab &#x2705;',
+      text: "Back-test the model against historical seasons where the true outcome is already known.",
+      pos: 'below' },
+    { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+      title: 'Select Season & Player &#x1F50D;',
+      text: "Pick a past season and a player. The app shows what the model would have predicted at the time alongside the player's actual stat line.",
+      pos: 'below' }
+  ]
+};
+
+// Fallback full tour if no tab is matched
+var FALLBACK_STEPS = [
   { find: function(){ return tabByText('NHL Predictor'); },
     title: 'Welcome &#x1F3D2;',
-    text: "Everything lives inside the NHL Predictor tab. Let's walk through each section so you know exactly where to look.",
+    text: "Everything lives inside the NHL Predictor tab. Navigate to any sub-tab and click Tour the App for a focused walkthrough of that section.",
     pos: 'below' },
   { find: function(){ return subTabByText('Offensive'); },
     title: 'Offensive Tab &#x2694;&#xFE0F;',
-    text: "Your starting point for any NHL forward. Search a player and get instant predictions across all 32 teams.",
-    pos: 'below' },
-  { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
-    title: 'Player Search &#x1F50D;',
-    text: "Type any part of a forward's name here &#x2014; partial names work. The dropdown auto-completes.",
-    pos: 'right' },
-  { find: function(){ return subTabByText('Team Fit'); },
-    title: 'Team Fit &#x1F4CA;',
-    text: "Ranks all 32 NHL teams by predicted fit &#x2014; Points/GP, Goals/GP, and Game Score. Gold = best fit.",
-    pos: 'below' },
-  { find: function(){ return subTabByText('Next Season'); },
-    title: 'Next Season &#x1F4C8;',
-    text: "Projects the player into the following season, adjusted for age curves and ascending/descending trajectory.",
-    pos: 'below' },
-  { find: function(){ return subTabByText('Roster Insertion'); },
-    title: 'Roster Insertion &#x1F4CB;',
-    text: "See exactly where the player slots into any team's lineup and which players get pushed down.",
+    text: "Start here to evaluate NHL forwards across all 32 teams.",
     pos: 'below' },
   { find: function(){ return subTabByText('Defensive'); },
     title: 'Defensive Tab &#x1F6E1;&#xFE0F;',
-    text: "Switch here for defensemen. Includes auto-classification (Defensive/Offensive/Two-Way D) and a Pairing tool.",
+    text: "Switch here for defensemen, including the Pairing tool.",
     pos: 'below' },
   { find: function(){ return subTabByText('Contract Evaluator'); },
     title: 'Contract Evaluator &#x1F4C4;',
-    text: "Project any player over 1&#x2013;8 seasons using NHL age curves. Works for forwards and defensemen.",
+    text: "Project any player over 1&#x2013;8 seasons to evaluate a contract offer.",
     pos: 'below' },
   { find: function(){ return subTabByText('Models'); },
-    title: 'Models Tab &#x1F52C;',
-    text: "Review MAE, RMSE and elite-player error from cross-validation to calibrate how much to trust any prediction.",
+    title: 'Models &#x1F52C;',
+    text: "Review model accuracy metrics and feature importance.",
     pos: 'below' },
   { find: function(){ return subTabByText('Validation'); },
-    title: 'Validation Tab &#x2705;',
-    text: "Back-test predictions against seasons with known outcomes to build confidence in the model.",
+    title: 'Validation &#x2705;',
+    text: "Back-test predictions against seasons with known outcomes.",
     pos: 'below' }
 ];
+
+var STEPS = FALLBACK_STEPS; // active step set, set on tour start
 
 function tabByText(t) {
   return Array.from(D.querySelectorAll('button[role="tab"]'))
@@ -302,60 +471,83 @@ function subTabByText(t) {
       || all.find(function(b){ return b.textContent.includes(t); });
 }
 
-function initAndStart() {
-  // Inject overlay elements into parent document once
-  if (!D.getElementById('tc-backdrop')) {
-    var style = D.createElement('style');
-    style.id = 'tc-style';
-    style.textContent =
-      '#tc-backdrop{position:fixed;inset:0;z-index:99998;display:none;}' +
-      '#tc-spot{position:fixed;z-index:99999;pointer-events:none;display:none;' +
-        'border-radius:8px;outline:3px solid #60a5fa;outline-offset:4px;' +
-        'box-shadow:0 0 0 9999px rgba(0,0,0,.75);' +
-        'transition:top .3s,left .3s,width .3s,height .3s;}' +
-      '#tc-card{position:fixed;z-index:100000;display:none;width:340px;' +
-        'background:#0f172a;border:1px solid #1e40af;border-radius:14px;' +
-        'padding:20px 22px;color:#f1f5f9;' +
-        'box-shadow:0 16px 48px rgba(0,0,0,.7);' +
-        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
-        'transition:top .3s,left .3s;}' +
-      '#tc-card .lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;}' +
-      '#tc-card h3{margin:0 0 8px;font-size:15px;color:#93c5fd;font-weight:700;}' +
-      '#tc-card p{margin:0 0 16px;font-size:13.5px;line-height:1.6;color:#cbd5e1;}' +
-      '#tc-card .prog{display:flex;gap:4px;margin-bottom:14px;}' +
-      '.tc-dot{height:4px;border-radius:2px;flex:1;background:#1e293b;transition:background .25s;}' +
-      '.tc-dot.on{background:#3b82f6;}.tc-dot.dn{background:#1d4ed8;}' +
-      '#tc-card .btns{display:flex;gap:8px;justify-content:flex-end;align-items:center;}' +
-      '.tb{padding:7px 15px;border-radius:7px;border:none;cursor:pointer;font-size:13px;font-weight:600;}' +
-      '.tx{background:transparent;color:#64748b;border:1px solid #334155 !important;}' +
-      '.tp{background:#1e293b;color:#cbd5e1;}.tp:hover{background:#334155;}' +
-      '.tn{background:#3b82f6;color:#fff;}.tn:hover{background:#2563eb;}';
-    D.head.appendChild(style);
-
-    var bd = D.createElement('div'); bd.id = 'tc-backdrop'; D.body.appendChild(bd);
-    var sp = D.createElement('div'); sp.id = 'tc-spot';     D.body.appendChild(sp);
-    var cd = D.createElement('div'); cd.id = 'tc-card';     D.body.appendChild(cd);
-    D.getElementById('tc-backdrop').addEventListener('click', exitTour);
+// Allow Escape key to exit tour
+D.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && D.getElementById('tc-card') &&
+      D.getElementById('tc-card').style.display !== 'none') {
+    exitTour();
   }
+});
+
+function initAndStart() {
+  // Detect which sub-tab is currently active
+  var activeTab = null;
+  var tabCandidates = ['Offensive', 'Defensive', 'Contract Evaluator', 'Models', 'Validation'];
+  for (var t = 0; t < tabCandidates.length; t++) {
+    var tabEl = subTabByText(tabCandidates[t]);
+    if (tabEl && (tabEl.getAttribute('aria-selected') === 'true' || tabEl.classList.contains('st-d8'))) {
+      activeTab = tabCandidates[t];
+      break;
+    }
+  }
+  // Also check by which tab button has the active underline style
+  if (!activeTab) {
+    var allTabs = Array.from(D.querySelectorAll('button[role="tab"]'));
+    for (var j = 0; j < allTabs.length; j++) {
+      var b = allTabs[j];
+      if (b.getAttribute('aria-selected') === 'true') {
+        var txt = b.textContent.trim();
+        if (ALL_TOURS[txt]) { activeTab = txt; break; }
+      }
+    }
+  }
+  STEPS = (activeTab && ALL_TOURS[activeTab]) ? ALL_TOURS[activeTab] : FALLBACK_STEPS;
+
+  // Update button label to show context
+  var label = activeTab ? ('Tour: ' + activeTab) : 'Tour the App';
+  D.getElementById('tc-btn').innerHTML = '&#x1F5FA;&#xFE0F;&nbsp; ' + label;
+
   curr = 0;
   D.getElementById('tc-backdrop').style.display = 'block';
   showStep(0);
 }
 
+// Update button label whenever a sub-tab is clicked
+setTimeout(function attachTabListeners() {
+  var tabBtns = Array.from(D.querySelectorAll('button[role="tab"]'));
+  tabBtns.forEach(function(b) {
+    b.addEventListener('click', function() {
+      var txt = b.textContent.trim();
+      var lbl = ALL_TOURS[txt] ? ('Tour: ' + txt) : 'Tour the App';
+      var btn = D.getElementById('tc-btn');
+      if (btn) btn.innerHTML = '&#x1F5FA;&#xFE0F;&nbsp; ' + lbl;
+    });
+  });
+}, 1200);
+
+
+
 function showStep(i) {
   var el = STEPS[i].find();
   if (!el) {
+    console.warn('[Tour] step ' + i + ' element not found, skipping');
     if (i < STEPS.length - 1) { curr = i + 1; showStep(curr); } else exitTour();
     return;
   }
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  setTimeout(function(){ renderStep(el, STEPS[i], i); }, 380);
+  setTimeout(function(){ renderStep(el, STEPS[i], i); }, 600);
 }
 
 function renderStep(el, step, i) {
   var PAD = 8;
   var r = el.getBoundingClientRect();
   var W = P.innerWidth, H = P.innerHeight;
+  // If element is still fully off-screen, scroll hasn't finished — retry in 150ms
+  // Note: don't check width===0 as some Streamlit wrappers report zero width
+  if (r.bottom < 0 || r.top > H) {
+    setTimeout(function(){ renderStep(el, step, i); }, 150);
+    return;
+  }
 
   var sp = D.getElementById('tc-spot');
   sp.style.display = 'block';
@@ -364,24 +556,55 @@ function renderStep(el, step, i) {
   sp.style.width  = (r.width  + PAD * 2) + 'px';
   sp.style.height = (r.height + PAD * 2) + 'px';
 
-  var CW = 340, CH = 250;
+  var CW = 340, CH = 220;
+
+  // Spotlight boundaries (with padding)
+  var spotTop    = r.top    - PAD;
+  var spotBottom = r.bottom + PAD;
+  var spotLeft   = r.left   - PAD;
+  var spotRight  = r.right  + PAD;
+
+  var GAP = 20; // minimum clear gap between card and spotlight
   var top, left;
-  if (step.pos === 'below') {
-    top  = r.bottom + PAD + 12;
-    left = Math.min(r.left, W - CW - 12);
+
+  // Always anchor horizontally to left edge of element (clamped to viewport)
+  left = Math.min(Math.max(r.left, 8), W - CW - 8);
+
+  // Prefer below; fall back to above
+  if (spotBottom + GAP + CH <= H - 8) {
+    top = spotBottom + GAP;
+  } else if (spotTop - GAP - CH >= 8) {
+    top = spotTop - GAP - CH;
   } else {
-    top  = r.top;
-    left = r.right + 16;
-    if (left + CW > W) left = r.left - CW - 16;
+    // Not enough room above or below — use below anyway and accept scroll
+    top = spotBottom + GAP;
   }
+
+  // Clamp to viewport
   top  = Math.max(8, Math.min(top,  H - CH - 8));
   left = Math.max(8, Math.min(left, W - CW - 8));
+
+  // Final collision check — if card still overlaps spotlight, push it clear
+  var cardBottom = top + CH;
+  var cardRight  = left + CW;
+  var overlapV = top < spotBottom && cardBottom > spotTop;
+  var overlapH = left < spotRight && cardRight  > spotLeft;
+  if (overlapV && overlapH) {
+    // Push below spotlight if there's any room, else push above
+    if (spotBottom + GAP + CH <= H - 8) {
+      top = spotBottom + GAP;
+    } else {
+      top = Math.max(8, spotTop - GAP - CH);
+    }
+  }
 
   var dots = STEPS.map(function(_, x){
     return '<div class="tc-dot ' + (x < i ? 'dn' : x === i ? 'on' : '') + '"></div>';
   }).join('');
 
-  var isLast = (i === STEPS.length - 1);
+  var isLast  = (i === STEPS.length - 1);
+  var waiting = !!step.waitFor;
+
   var cd = D.getElementById('tc-card');
   cd.style.display = 'block';
   cd.style.top  = top  + 'px';
@@ -391,30 +614,49 @@ function renderStep(el, step, i) {
     '<div class="prog">' + dots + '</div>' +
     '<h3>' + step.title + '</h3>' +
     '<p>'  + step.text  + '</p>' +
-    '<div class="btns">' +
-      '<button class="tb tx" id="tc-x">&#x2715; Exit</button>' +
-      (i > 0 ? '<button class="tb tp" id="tc-p">&#x2190; Back</button>' : '') +
-      '<button class="tb tn" id="tc-n">' + (isLast ? '&#x1F389; Done' : 'Next &#x2192;') + '</button>' +
-    '</div>';
+    (waiting
+      ? '<div class="btns"><button class="tb tx" id="tc-x">&#x2715; Exit</button>' +
+        '<span style="font-size:13px;color:#93c5fd;margin-left:8px;">' +
+          (step.waitMsg || '&#x23F3; Waiting...') +
+        '</span></div>'
+      : '<div class="btns">' +
+          '<button class="tb tx" id="tc-x">&#x2715; Exit</button>' +
+          (i > 0 ? '<button class="tb tp" id="tc-p">&#x2190; Back</button>' : '') +
+          '<button class="tb tn" id="tc-n">' + (isLast ? '&#x1F389; Done' : 'Next &#x2192;') + '</button>' +
+        '</div>');
 
   D.getElementById('tc-x').onclick = exitTour;
-  D.getElementById('tc-n').onclick = function(){ isLast ? exitTour() : (curr++ , showStep(curr)); };
-  var pb = D.getElementById('tc-p');
-  if (pb) pb.onclick = function(){ curr--; showStep(curr); };
+  if (!waiting) {
+    D.getElementById('tc-n').onclick = function(){ isLast ? exitTour() : (curr++, showStep(curr)); };
+    var pb = D.getElementById('tc-p');
+    if (pb) pb.onclick = function(){ curr--; showStep(curr); };
+  }
+
+  if (waiting) {
+    if (waitPoll) clearInterval(waitPoll);
+    waitPoll = setInterval(function() {
+      if (step.waitFor()) {
+        clearInterval(waitPoll);
+        waitPoll = null;
+        curr++;
+        showStep(curr);
+      }
+    }, 400);
+  }
 }
 
 function exitTour() {
+  if (waitPoll) { clearInterval(waitPoll); waitPoll = null; }
   D.getElementById('tc-backdrop').style.display = 'none';
   D.getElementById('tc-spot').style.display     = 'none';
   D.getElementById('tc-card').style.display     = 'none';
 }
+})();
 </script>
 </body>
 </html>
 """
-    components.html(_TOUR_HTML, height=60)
-
-
+    components.html(_TOUR_HTML, height=0)
 
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
