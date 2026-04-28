@@ -1027,12 +1027,15 @@ def make_importance_chart(models, feature_names, top_n=15):
 
 # ── Theme / background ────────────────────────────────────────────────────────
 
-def _brighten_for_gradient(hex_color: str, min_luminance: float = 0.12) -> str:
+def _brighten_for_gradient(hex_color: str, min_luminance: float = 0.22) -> str:
     """
     If a hex color is too dark to show against the app background, mix it
     toward white until it clears min_luminance. Returns the (possibly brightened)
     hex string so team gradients are always visible regardless of how dark the
     team's brand color is (e.g. DAL green, COL burgundy, VGK gold-black).
+    Threshold 0.22 brightens only truly dark colours (e.g. near-black VGK gold)
+    while leaving medium brand colours like NYR navy/red closer to their
+    original hue so the gradient looks authentic rather than washed-out.
     """
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
@@ -1040,8 +1043,8 @@ def _brighten_for_gradient(hex_color: str, min_luminance: float = 0.12) -> str:
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
     if luminance >= min_luminance:
         return hex_color
-    # Mix toward white until luminance target is met (max 3 passes)
-    for _ in range(3):
+    # Mix toward white until luminance target is met (max 5 passes)
+    for _ in range(5):
         r = min(255, int(r + (255 - r) * 0.45))
         g = min(255, int(g + (255 - g) * 0.45))
         b = min(255, int(b + (255 - b) * 0.45))
@@ -1051,33 +1054,61 @@ def _brighten_for_gradient(hex_color: str, min_luminance: float = 0.12) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def apply_team_theme(team: str = None) -> None:
+def _team_gradient(team_name: str) -> str:
+    """Return the CSS gradient string for a team, or 'none' if not found."""
+    if team_name and team_name in TEAM_COLORS:
+        p = _brighten_for_gradient(TEAM_COLORS[team_name]["primary"])
+        s = _brighten_for_gradient(TEAM_COLORS[team_name]["secondary"])
+        # 99 ≈ 60% opacity primary, 70 ≈ 44% secondary — noticeably brighter
+        # than the original 70/50 (44%/31%) without washing colours out
+        return f"linear-gradient(135deg, {p}99 0%, #141414 50%, {s}70 100%)"
+    return "none"
+
+
+def update_team_colors(player_team: str = None, override_team: str = None) -> None:
     """
-    Inject a full dark-mode CSS override so the app always renders dark
-    regardless of the user's system/Streamlit light-mode setting.
-    When a team is provided, a subtle team-colour gradient is added to
-    the background. Text, inputs, widgets, and metrics are all forced
-    to dark-friendly colours.
+    Lightweight update — sets CSS gradient variables AND directly sets .stApp
+    background to the player's BASE gradient.
+
+    Always uses the base (player's real team) for the immediate background so
+    a stale override from Roster Insertion / Pairing / Contract can never bleed
+    onto Team Fit or Next Season.  The JS MutationObserver switches to the
+    override gradient when the user is actually on one of those tabs.
     """
-    if team and team in TEAM_COLORS:
-        primary   = TEAM_COLORS[team]["primary"]
-        secondary = TEAM_COLORS[team]["secondary"]
-        grad_primary   = _brighten_for_gradient(primary)
-        grad_secondary = _brighten_for_gradient(secondary)
-        bg_css = (
-            f"background-color: #141414 !important;"
-            f"background-image: linear-gradient("
-            f"135deg, {grad_primary}70 0%, #141414 50%, {grad_secondary}50 100%"
-            f") !important;"
-        )
-    else:
-        bg_css = "background-color: #141414 !important; background-image: none !important;"
+    base_grad = _team_gradient(player_team)
+    over_grad = _team_gradient(override_team) if override_team else base_grad
+    st.markdown(
+        f"<style>"
+        f":root{{--team-bg-base:{base_grad};--team-bg-override:{over_grad};}}"
+        f".stApp{{background-color:#141414!important;background-image:{base_grad}!important;}}"
+        f"</style>",
+        unsafe_allow_html=True,
+    )
+
+
+def apply_team_theme(player_team: str = None, override_team: str = None) -> None:
+    """
+    Inject the full dark-mode CSS override.  Called ONCE at app startup (line 35).
+    Always uses the player's BASE gradient for .stApp so that Team Fit and Next
+    Season always show the correct team colour immediately.
+    The JS MutationObserver switches to --team-bg-override when the user is on
+    Roster Insertion, Pairing, or Contract Evaluator.
+    """
+    base_grad = _team_gradient(player_team)
+    over_grad = _team_gradient(override_team) if override_team else base_grad
 
     css = f"""
     <style>
-    /* ── Force full dark theme ─────────────────────────────────────── */
+    /* ── Team-colour CSS variables (read by JS observer for tab-switch) ── */
+    :root {{
+        --team-bg-base:     {base_grad};
+        --team-bg-override: {over_grad};
+    }}
+
+    /* ── Force full dark theme — always base gradient, JS handles override ── */
     .stApp {{
-        {bg_css}
+        background-color: #141414 !important;
+        background-image: {base_grad} !important;
         color: #f0f0f0 !important;
     }}
 
@@ -1089,8 +1120,7 @@ def apply_team_theme(team: str = None) -> None:
         color: #f0f0f0 !important;
     }}
 
-    /* Headings and specific Streamlit text containers — NOT span/div/p
-       so inline color styles (percentile bars, team colors etc.) still work */
+    /* Headings and specific Streamlit text containers */
     h1, h2, h3, h4, h5, h6 {{
         color: #ffffff !important;
     }}
@@ -1099,7 +1129,6 @@ def apply_team_theme(team: str = None) -> None:
     [data-testid="stMarkdownContainer"] > div {{
         color: #f0f0f0 !important;
     }}
-    /* Streamlit caption / helper text */
     .stText, small {{
         color: #cccccc !important;
     }}
@@ -1134,7 +1163,7 @@ def apply_team_theme(team: str = None) -> None:
         background-color: #1e2a45 !important;
     }}
 
-    /* Dropdown popup — renders in a portal outside .stApp, must target body-level */
+    /* Dropdown popup */
     [data-baseweb="popover"],
     [data-baseweb="menu"],
     [role="listbox"],

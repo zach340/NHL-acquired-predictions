@@ -13,23 +13,29 @@ from model_utils import *
 
 # ── Module-level callbacks — must be defined before any widgets ─────────────
 def _on_insertion_team_change():
-    st.session_state["active_team"]   = st.session_state.get("insertion_team")
+    st.session_state["active_team"]    = st.session_state.get("insertion_team")
     st.session_state["_team_override"] = True
 
 def _on_pair_team_change():
-    st.session_state["active_team"]   = st.session_state.get("pair_team_sel")
+    st.session_state["active_team"]    = st.session_state.get("pair_team_sel")
     st.session_state["_team_override"] = True
 
 def _on_contract_team_change():
-    st.session_state["active_team"]   = st.session_state.get("contract_team")
+    st.session_state["active_team"]    = st.session_state.get("contract_team")
     st.session_state["_team_override"] = True
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
-# Apply team theme on every run — reads from session state so it persists
-# across tab switches without needing the player to be re-selected.
-apply_team_theme(st.session_state.get("active_team"))
+# Apply theme on every run.
+# player_base_team  = the player's actual team  → always used on non-override tabs
+# active_team       = insertion / pairing / contract team → used only on those tabs
+# The JS observer in _TAB_THEME_JS (injected below) watches aria-selected on tab
+# buttons and swaps between --team-bg-base and --team-bg-override in real time.
+apply_team_theme(
+    player_team   = st.session_state.get("player_base_team"),
+    override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
+)
 st.title("NHL Player Predictor")
 st.caption("Forwards-only mode: defensemen are excluded from training and predictions.")
 
@@ -658,6 +664,85 @@ function exitTour() {
 """
     components.html(_TOUR_HTML, height=0)
 
+    # ── Tab-aware background switcher ─────────────────────────────────────────────
+    # Runs in a zero-height iframe (like the tour above) and accesses the parent
+    # document via window.parent.  A single MutationObserver is registered once
+    # and persists across Streamlit rerenders (stored on window.parent).
+    # On each rerender the iframe re-executes, picks up the latest CSS variable
+    # values (--team-bg-base / --team-bg-override set by apply_team_theme), and
+    # immediately applies the correct gradient for whichever tab is currently active.
+    _TAB_THEME_JS = """<!DOCTYPE html><html>
+<head><style>body{margin:0;background:transparent;}</style></head>
+<body><script>
+(function(){
+  var P = window.parent;
+  var D = P.document;
+  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing', 'Contract Evaluator'];
+
+  function applyTheme() {
+    var style = P.getComputedStyle(D.documentElement);
+    var base = style.getPropertyValue('--team-bg-base').trim();
+    var over = style.getPropertyValue('--team-bg-override').trim();
+    if (!base || base === 'none') {
+      // No team selected — clear to plain dark
+      var app = D.querySelector('.stApp');
+      if (app) app.style.setProperty('background-image', 'none', 'important');
+      return;
+    }
+
+    var tabs = D.querySelectorAll('[role="tab"][aria-selected="true"]');
+    var useOverride = false;
+    for (var i = 0; i < tabs.length; i++) {
+      if (OVERRIDE_TABS.indexOf(tabs[i].textContent.trim()) >= 0) {
+        useOverride = true;
+        break;
+      }
+    }
+
+    var app = D.querySelector('.stApp');
+    if (app) {
+      app.style.setProperty(
+        'background-image',
+        useOverride ? (over || base) : base,
+        'important'
+      );
+    }
+  }
+
+  // ── Observer 1: tab switches (aria-selected changes) ──────────────────────
+  if (!P._teamTabObserver) {
+    P._teamTabObserver = new MutationObserver(applyTheme);
+    P._teamTabObserver.observe(D.body, {
+      subtree: true, attributes: true, attributeFilter: ['aria-selected']
+    });
+  }
+
+  // ── Observer 2: CSS variable updates (<style> tag injected by update_team_colors)
+  // Fires immediately when a player is selected so the gradient shows without
+  // waiting for a tab click.
+  if (!P._teamStyleObserver) {
+    P._teamStyleObserver = new MutationObserver(function(mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var nodes = mutations[i].addedNodes;
+        for (var j = 0; j < nodes.length; j++) {
+          var n = nodes[j];
+          if (n.tagName === 'STYLE' || (n.tagName === 'DIV' && n.querySelector && n.querySelector('style'))) {
+            applyTheme();
+            return;
+          }
+        }
+      }
+    });
+    P._teamStyleObserver.observe(D.head, {childList: true});
+    P._teamStyleObserver.observe(D.body, {childList: true, subtree: false});
+  }
+
+  // Run immediately on each iframe load (catches rerenders)
+  applyTheme();
+})();
+</script></body></html>"""
+    components.html(_TAB_THEME_JS, height=0)
+
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
         st.caption("Search for a forward to see offensive predictions.")
@@ -666,7 +751,8 @@ function exitTour() {
 
         pred = None
         if not off_input:
-            st.session_state.pop("active_team", None)  # reset to black when cleared
+            st.session_state.pop("active_team", None)      # reset to black when cleared
+            st.session_state.pop("player_base_team", None)
         if off_input:
             first = predict_player(off_input, df, team_ctx, fit_models, next_models,
                                    player_profiles, has_age)
@@ -694,22 +780,32 @@ function exitTour() {
                 pred = predict_player(off_input, df, team_ctx, fit_models, next_models,
                                       player_profiles, has_age, override_team=override_team)
                 if pred:
-                    st.session_state["active_team"] = pred.get("actual_team")
-                    apply_team_theme(pred.get("actual_team"))
+                    st.session_state["active_team"]        = pred.get("actual_team")
+                    st.session_state["player_base_team"]   = pred.get("actual_team")
+                    st.session_state["_last_player_source"] = "offensive"
+                    update_team_colors(player_team=pred.get("actual_team"))
             else:
                 pred = first
             if pred:
                 st.session_state["shared_pred"] = pred
-                # New player → reset all tab-team overrides
-                if st.session_state.get("_active_pid") != pred.get("pid"):
-                    st.session_state["_active_pid"]    = pred.get("pid")
-                    st.session_state["_team_override"] = False
+                # New offensive player → reset overrides (use per-tab pid to avoid
+                # conflicting with the defensive tab's own _def_pid tracker).
+                if st.session_state.get("_off_pid") != pred.get("pid"):
+                    st.session_state["_off_pid"]            = pred.get("pid")
+                    st.session_state["_last_player_source"] = "offensive"
+                    st.session_state["_team_override"]      = False
                     for _k in ("insertion_team", "pair_team_sel", "contract_team"):
                         st.session_state.pop(_k, None)
-                # Only apply player's team if no tab override is active
-                if not st.session_state.get("_team_override"):
-                    st.session_state["active_team"] = pred.get("actual_team")
-                    apply_team_theme(pred.get("actual_team"))
+                # Only apply colors when this tab was the most-recently-used one,
+                # so it doesn't overwrite the defensive/contract tab's team color.
+                if st.session_state.get("_last_player_source") == "offensive":
+                    st.session_state["player_base_team"] = pred.get("actual_team")
+                    if not st.session_state.get("_team_override"):
+                        st.session_state["active_team"] = pred.get("actual_team")
+                    update_team_colors(
+                        player_team   = pred.get("actual_team"),
+                        override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
+                    )
 
         off_t1, off_t2, off_t3 = st.tabs(["Team Fit", "Next Season", "Roster Insertion"])
 
@@ -966,14 +1062,22 @@ function exitTour() {
                     "age":          None,
                 }
                 st.session_state["shared_pred"] = def_pred_input
-                if st.session_state.get("_active_pid") != def_pred_input.get("pid"):
-                    st.session_state["_active_pid"]    = def_pred_input.get("pid")
-                    st.session_state["_team_override"] = False
+                # New defensive player → use own _def_pid tracker so it doesn't
+                # interfere with the offensive tab's _off_pid.
+                if st.session_state.get("_def_pid") != def_pred_input.get("pid"):
+                    st.session_state["_def_pid"]            = def_pred_input.get("pid")
+                    st.session_state["_last_player_source"] = "defensive"
+                    st.session_state["_team_override"]      = False
                     for _k in ("insertion_team", "pair_team_sel", "contract_team"):
                         st.session_state.pop(_k, None)
-                if not st.session_state.get("_team_override"):
-                    st.session_state["active_team"] = def_pred_input.get("actual_team")
-                    apply_team_theme(def_pred_input.get("actual_team"))
+                if st.session_state.get("_last_player_source") == "defensive":
+                    st.session_state["player_base_team"] = def_pred_input.get("actual_team")
+                    if not st.session_state.get("_team_override"):
+                        st.session_state["active_team"] = def_pred_input.get("actual_team")
+                    update_team_colors(
+                        player_team   = def_pred_input.get("actual_team"),
+                        override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
+                    )
 
 
                 _dpred_key = f"dpred_{def_first['pid']}"
@@ -1329,14 +1433,20 @@ function exitTour() {
                 else:
                     pred = first_c
                 if pred:
-                    if st.session_state.get("_active_pid") != pred.get("pid"):
-                        st.session_state["_active_pid"]    = pred.get("pid")
-                        st.session_state["_team_override"] = False
+                    if st.session_state.get("_contract_pid") != pred.get("pid"):
+                        st.session_state["_contract_pid"]       = pred.get("pid")
+                        st.session_state["_last_player_source"] = "contract"
+                        st.session_state["_team_override"]      = False
                         for _k in ("insertion_team", "pair_team_sel", "contract_team"):
                             st.session_state.pop(_k, None)
-                    if not st.session_state.get("_team_override"):
-                        st.session_state["active_team"] = pred.get("actual_team")
-                        apply_team_theme(pred.get("actual_team"))
+                    if st.session_state.get("_last_player_source") == "contract":
+                        st.session_state["player_base_team"] = pred.get("actual_team")
+                        if not st.session_state.get("_team_override"):
+                            st.session_state["active_team"] = pred.get("actual_team")
+                        update_team_colors(
+                            player_team   = pred.get("actual_team"),
+                            override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
+                        )
             elif def_models_loaded:
                 def_c = def_predict_defenseman(
                     contract_input, def_df, def_team_ctx,
