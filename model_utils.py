@@ -61,7 +61,12 @@ LINEMATE_FILE  = "linemate_features.csv"
 CACHE_FILE     = "trained_models_forwards_v5.joblib"
 NAMES_FILE     = "player_names.csv"     # persistent NHL API name cache
 DEF_FILE       = "defensive_dataset.csv"
-OFF_FILE       = "season_dataset.csv"    # shared with offensive model — contains D-men too
+OFF_FILE       = "season_dataset.csv"   # shared with offensive model — contains D-men too
+
+# Shift pair data is cached on disk so it survives app restarts.
+# Each file: shifts_cache/{TEAM}_{N_GAMES}.json — refreshed when > TTL hours old.
+SHIFTS_CACHE_DIR   = "shifts_cache"
+SHIFTS_CACHE_TTL_H = 6   # hours before a cached file is considered stale
 
 # Danger zone weights (empirically derived from historical conversion rates)
 HD_WEIGHT = 11.2
@@ -1065,50 +1070,200 @@ def _team_gradient(team_name: str) -> str:
     return "none"
 
 
-def update_team_colors(player_team: str = None, override_team: str = None) -> None:
-    """
-    Lightweight update — sets CSS gradient variables AND directly sets .stApp
-    background to the player's BASE gradient.
+def _build_team_grad_map() -> dict:
+    """Precompute {team_code: gradient_string} for all known teams."""
+    return {team: _team_gradient(team) for team in TEAM_COLORS}
 
-    Always uses the base (player's real team) for the immediate background so
-    a stale override from Roster Insertion / Pairing / Contract can never bleed
-    onto Team Fit or Next Season.  The JS MutationObserver switches to the
-    override gradient when the user is actually on one of those tabs.
+
+def _make_roster_tab_js_html() -> str:
     """
-    base_grad = _team_gradient(player_team)
-    over_grad = _team_gradient(override_team) if override_team else base_grad
+    Generate the iframe HTML with all team gradients baked in as a JS constant.
+    This allows the background to switch INSTANTLY when the user changes the
+    team dropdown — no Streamlit rerun needed.
+    """
+    import json
+    grad_json = json.dumps(_build_team_grad_map())
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><style>html,body{{margin:0;padding:0;background:transparent;}}</style></head>
+<body>
+<script>
+(function(){{
+  var D = window.parent.document;
+
+  /* All team gradients baked in — no round-trip to Python required. */
+  var GRADS = {grad_json};
+
+  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing'];
+
+  function isRosterActive() {{
+    return Array.from(D.querySelectorAll('button[role="tab"]')).some(function(t) {{
+      return OVERRIDE_TABS.indexOf(t.textContent.trim()) !== -1 &&
+             t.getAttribute('aria-selected') === 'true';
+    }});
+  }}
+
+  function applyGrad(grad) {{
+    var app = D.querySelector('.stApp');
+    if (app) app.style.setProperty('background-image', grad, 'important');
+  }}
+
+  function clearGrad() {{
+    var app = D.querySelector('.stApp');
+    if (app) app.style.removeProperty('background-image');
+  }}
+
+  /* Read whatever team code is currently shown in a visible selectbox.
+     Scans each word of the element's visible text so it works regardless
+     of whether BaseWeb renders the value in a span, div, or any other tag.
+     Team codes are 2-3 uppercase letters (e.g. "PIT") — player name words
+     are mixed-case so they never collide. */
+  function activeSelectboxTeam() {{
+    var selects = D.querySelectorAll('[data-baseweb="select"]');
+    for (var i = 0; i < selects.length; i++) {{
+      var rect = selects[i].getBoundingClientRect();
+      if (rect.width === 0) continue;   // hidden / not in active tab
+      var words = (selects[i].innerText || selects[i].textContent || '')
+                    .trim().split(/\s+/);
+      for (var j = 0; j < words.length; j++) {{
+        var w = words[j].replace(/[^A-Z]/g, '');  // strip parens etc.
+        if (GRADS[w]) return w;
+      }}
+    }}
+    return null;
+  }}
+
+  /* Full update: tab state + current selectbox value. */
+  function update() {{
+    if (isRosterActive()) {{
+      var code = activeSelectboxTeam();
+      if (code) {{
+        applyGrad(GRADS[code]);
+      }} else {{
+        /* Fall back to the CSS-var override set by Python. */
+        var cs = getComputedStyle(D.documentElement);
+        var grad = cs.getPropertyValue('--team-bg-override').trim();
+        if (grad && grad !== 'none') applyGrad(grad);
+      }}
+    }} else {{
+      clearGrad();
+    }}
+  }}
+
+  /* --- one-time observer setup --- */
+  if (D.__teamBgReady) {{
+    /* Rerun: refresh the update fn reference so the parent poll stays current. */
+    window.parent.__teamBgUpdate = update;
+    update();
+    return;
+  }}
+  D.__teamBgReady = true;
+
+  /* Expose on parent so the interval below can call the latest closure
+     even after this iframe is replaced on a subsequent rerun. */
+  window.parent.__teamBgUpdate = update;
+
+  /* Instant tab-click response. */
+  new MutationObserver(function(muts) {{
+    for (var i = 0; i < muts.length; i++) {{
+      if (muts[i].attributeName === 'aria-selected') {{ update(); return; }}
+    }}
+  }}).observe(D.body, {{
+    attributes: true, subtree: true, attributeFilter: ['aria-selected']
+  }});
+
+  /* Poll runs in the PARENT window — survives iframe replacement on reruns.
+     Each new iframe updates window.parent.__teamBgUpdate so this always
+     calls the freshest closure with the latest GRADS / D references. */
+  window.parent.setInterval(function() {{
+    window.parent.__teamBgUpdate && window.parent.__teamBgUpdate();
+  }}, 50);
+
+  update();
+}})();
+</script>
+</body>
+</html>"""
+
+
+def _team_bg_css_vars(base_grad: str, override_grad: str) -> str:
+    """<style> block that sets the two live CSS custom properties.
+    Streamlit updates <style> content reliably on every rerun, and because
+    .stApp uses var(--team-bg-base) directly, the background updates the
+    instant this block is parsed — no JS round-trip required.
+    """
+    return (
+        f"<style>:root{{"
+        f"--team-bg-base:{base_grad};"
+        f"--team-bg-override:{override_grad};"
+        f"}}</style>"
+    )
+
+
+def update_team_colors(player_team: str = None, override_team: str = None) -> None:
+    """Refresh the CSS custom properties so the background updates instantly.
+    Because .stApp references var(--team-bg-base) directly, changing the var
+    is enough — no !important battles, no JS execution needed.
+    """
+    base_grad     = _team_gradient(player_team)
+    override_grad = _team_gradient(override_team) if override_team else base_grad
     st.markdown(
-        f"<style>"
-        f":root{{--team-bg-base:{base_grad};--team-bg-override:{over_grad};}}"
-        f".stApp{{background-color:#141414!important;background-image:{base_grad}!important;}}"
-        f"</style>",
+        "\n" + _team_bg_css_vars(base_grad, override_grad),
         unsafe_allow_html=True,
     )
 
 
 def apply_team_theme(player_team: str = None, override_team: str = None) -> None:
+    """Inject the full dark-mode CSS + one-time tab-aware switcher JS.
+
+    Background strategy
+    ───────────────────
+    • :root CSS vars (--team-bg-base / --team-bg-override) are written on
+      every Streamlit rerun by this function and update_team_colors().
+    • .stApp uses  background-image: var(--team-bg-base)  so it tracks the
+      var live — any rerun that changes the var immediately changes the bg.
+    • .stApp.team-bg-roster (higher specificity) uses var(--team-bg-override).
+    • The JS observer adds/removes that class based on which sub-tab is active.
+
+    This avoids all !important source-order cascade problems: the first player
+    shows immediately because update_team_colors() sets --team-bg-base and
+    .stApp picks it up in the same render pass.
     """
-    Inject the full dark-mode CSS override.  Called ONCE at app startup (line 35).
-    Always uses the player's BASE gradient for .stApp so that Team Fit and Next
-    Season always show the correct team colour immediately.
-    The JS MutationObserver switches to --team-bg-override when the user is on
-    Roster Insertion, Pairing, or Contract Evaluator.
+    base_grad     = _team_gradient(player_team)
+    override_grad = _team_gradient(override_team) if override_team else base_grad
+
+
+def apply_team_theme(player_team: str = None, override_team: str = None) -> None:
     """
-    base_grad = _team_gradient(player_team)
-    over_grad = _team_gradient(override_team) if override_team else base_grad
+    Inject the full dark-mode CSS + the tab-aware background switcher.
+    Called on every Streamlit rerun (top of app.py).
+
+    How the background switching works:
+      • Two CSS custom properties on :root are updated every rerun:
+            --team-bg-base     (player's real team gradient)
+            --team-bg-override (insertion / target team gradient)
+      • A one-time JS MutationObserver + 300 ms interval reads whichever
+        property is appropriate for the active tab and writes it into a
+        dedicated <style id="__team_bg_sw"> tag with !important.
+      • Because CSS vars update reliably without script re-execution,
+        every player/team change is reflected within one polling tick.
+    """
+    base_grad     = _team_gradient(player_team)
+    override_grad = _team_gradient(override_team) if override_team else base_grad
 
     css = f"""
     <style>
-    /* ── Team-colour CSS variables (read by JS observer for tab-switch) ── */
+    /* ── Live CSS custom properties (updated every rerun) ──────────── */
     :root {{
         --team-bg-base:     {base_grad};
-        --team-bg-override: {over_grad};
+        --team-bg-override: {override_grad};
     }}
 
-    /* ── Force full dark theme — always base gradient, JS handles override ── */
+    /* ── Base dark theme ────────────────────────────────────────────── */
     .stApp {{
         background-color: #141414 !important;
-        background-image: {base_grad} !important;
+        background-image: var(--team-bg-base) !important;
         color: #f0f0f0 !important;
     }}
 
@@ -1229,7 +1384,11 @@ def apply_team_theme(player_team: str = None, override_team: str = None) -> None
     }}
     </style>
     """
+    # css already contains :root { --team-bg-base / --team-bg-override }.
+    # The JS observer is injected via st_components.html (real iframe) so its
+    # script is guaranteed to execute — unlike st.markdown innerHTML scripts.
     st.markdown(css, unsafe_allow_html=True)
+    st_components.html(_make_roster_tab_js_html(), height=0)
 
 
 # Team logo base URL
@@ -3251,69 +3410,75 @@ def def_fetch_team_roster_d(team_code):
         return []
 
 
-@st.cache_data(ttl=21600, show_spinner=False)   # 6-hour TTL — season data barely changes
-def fetch_actual_pairs(team_code, d_pids=None, n_games=25):
-    """
-    Fetch actual D-pair combinations from NHL shift chart data.
-    n_games: how many of the most recent games to include (default 25).
-    d_pids: frozenset of defenseman player IDs to filter shifts.
-    Returns a list of (pid1, pid2, shared_seconds) sorted by shared TOI desc.
-    """
-    # Convert to set for fast lookup (cache receives frozenset)
-    d_pids_set = set(d_pids) if d_pids else None
+
+import json as _json_mod
+import time as _time_mod
+
+def _shifts_cache_path(team_code: str, n_games: int) -> str:
+    os.makedirs(SHIFTS_CACHE_DIR, exist_ok=True)
+    return os.path.join(SHIFTS_CACHE_DIR, f"{team_code}_{n_games}.json")
+
+
+def _load_shifts_disk_cache(team_code: str, n_games: int):
+    """Return (pairs_list, err_str) from disk cache, or None if missing/stale."""
+    path = _shifts_cache_path(team_code, n_games)
     try:
-        from collections import defaultdict
+        if not os.path.exists(path):
+            return None
+        age_seconds = _time_mod.time() - os.path.getmtime(path)
+        if age_seconds > SHIFTS_CACHE_TTL_H * 3600:
+            return None                   # stale — will re-fetch
+        with open(path, "r") as f:
+            payload = _json_mod.load(f)
+        pairs = [tuple(p) for p in payload["pairs"]]   # list of (pid1, pid2, toi)
+        return pairs, payload.get("err")
+    except Exception:
+        return None
 
-        # Fetch the full current-season schedule in one call
-        sched_url = f"https://api-web.nhle.com/v1/club-schedule-season/{team_code}/now"
-        resp = requests.get(sched_url, timeout=15)
-        resp.raise_for_status()
-        all_games = resp.json().get("games", [])
 
-        # Keep only finished regular-season games
-        finished = [
-            g for g in all_games
-            if g.get("gameType", 2) == 2                              # regular season
-            and g.get("gameState") not in ("FUT", "PRE", "PREVIEW")  # already played
-        ]
-        finished = sorted(finished, key=lambda g: g.get("gameDate", ""), reverse=True)
-        finished = finished[:n_games]   # ← cap to n most recent games
+def _save_shifts_disk_cache(team_code: str, n_games: int, pairs, err):
+    """Persist (pairs_list, err_str) to disk so the next reload is instant."""
+    path = _shifts_cache_path(team_code, n_games)
+    try:
+        payload = {"pairs": [list(p) for p in pairs], "err": err}
+        with open(path, "w") as f:
+            _json_mod.dump(payload, f)
+    except Exception:
+        pass   # disk write failure is non-fatal
 
-        if not finished:
-            return [], "No finished regular-season games found for this team."
 
-        # Build shared TOI matrix from shifts across selected games
-        pair_toi = defaultdict(int)  # (pid1, pid2) -> shared seconds
-        errors   = []
-        games_processed = 0
+def _pairs_run_games(finished, team_code, d_pids_set, on_progress=None):
+    """
+    Core per-game loop shared by fetch_actual_pairs (cached) and
+    stream_fetch_actual_pairs (uncached with live progress).
 
-        for game in finished:   # ← no cap — full season
-            game_id = game.get("id")
-            if not game_id:
-                continue
+    on_progress(done, total) is called after every game if provided.
+    Returns (pairs_list, error_str_or_None).
+    """
+    from collections import defaultdict
+
+    def _to_secs(t):
+        if isinstance(t, (int, float)):
+            return int(t)
+        try:
+            parts = str(t).split(":")
+            return int(parts[0]) * 60 + int(parts[1])
+        except Exception:
+            return 0
+
+    pair_toi = defaultdict(int)
+    errors   = []
+    total    = len(finished)
+
+    for idx, game in enumerate(finished):
+        game_id = game.get("id")
+        if game_id:
             try:
-                shift_url = f"https://api.nhle.com/stats/rest/en/shiftcharts?cayenneExp=gameId={game_id}"
+                shift_url  = f"https://api.nhle.com/stats/rest/en/shiftcharts?cayenneExp=gameId={game_id}"
                 shift_resp = requests.get(shift_url, timeout=15)
                 shift_resp.raise_for_status()
                 shifts_raw = shift_resp.json().get("data", [])
-                if not shifts_raw:
-                    continue
 
-                # Stats API shift fields:
-                # playerId, teamAbbrev, period, startTime, endTime, detailCode
-                # startTime/endTime are MM:SS strings — convert to seconds
-
-                def _to_secs(t):
-                    """Convert MM:SS string or int to seconds."""
-                    if isinstance(t, (int, float)):
-                        return int(t)
-                    try:
-                        parts = str(t).split(":")
-                        return int(parts[0]) * 60 + int(parts[1])
-                    except Exception:
-                        return 0
-
-                # Filter to team's D-men shifts only (detailCode 0 = regular shift)
                 team_shifts = [
                     s for s in shifts_raw
                     if s.get("teamAbbrev") == team_code
@@ -3321,13 +3486,11 @@ def fetch_actual_pairs(team_code, d_pids=None, n_games=25):
                     and (d_pids_set is None or s.get("playerId") in d_pids_set)
                 ]
 
-                # Group shifts by period and find overlapping D pairs
                 by_period = defaultdict(list)
                 for s in team_shifts:
                     by_period[s["period"]].append(s)
 
                 for period, period_shifts in by_period.items():
-                    # Sort by start time in seconds
                     period_shifts.sort(key=lambda x: _to_secs(x.get("startTime", 0)))
                     n = len(period_shifts)
                     for i in range(n):
@@ -3348,25 +3511,87 @@ def fetch_actual_pairs(team_code, d_pids=None, n_games=25):
                             if overlap > 0:
                                 key = tuple(sorted([pid_i, pid_j]))
                                 pair_toi[key] += overlap
-                games_processed += 1
             except Exception as e:
                 errors.append(f"game {game_id}: {e}")
-                continue
 
-        if not pair_toi:
-            err_msg = f"Shift data unavailable ({'; '.join(errors[:3])})." if errors else "No shift overlap data found."
-            return [], err_msg
+        if on_progress:
+            on_progress(idx + 1, total)
 
-        pairs = sorted(pair_toi.items(), key=lambda x: x[1], reverse=True)
-        return [(p[0], p[1], toi) for (p, toi) in pairs], None
+    if not pair_toi:
+        err_msg = (f"Shift data unavailable ({'; '.join(errors[:3])})."
+                   if errors else "No shift overlap data found.")
+        return [], err_msg
 
+    pairs = sorted(pair_toi.items(), key=lambda x: x[1], reverse=True)
+    return [(p[0], p[1], toi) for (p, toi) in pairs], None
+
+
+def _pairs_fetch_schedule(team_code, n_games):
+    """Fetch and filter the n most recent finished regular-season games."""
+    sched_url = f"https://api-web.nhle.com/v1/club-schedule-season/{team_code}/now"
+    resp = requests.get(sched_url, timeout=15)
+    resp.raise_for_status()
+    all_games = resp.json().get("games", [])
+    finished = [
+        g for g in all_games
+        if g.get("gameType", 2) == 2
+        and g.get("gameState") not in ("FUT", "PRE", "PREVIEW")
+    ]
+    finished = sorted(finished, key=lambda g: g.get("gameDate", ""), reverse=True)
+    return finished[:n_games]
+
+
+@st.cache_data(ttl=21600, show_spinner=False)   # 6-hour TTL — season data barely changes
+def fetch_actual_pairs(team_code, d_pids=None, n_games=25):
+    """
+    Fetch actual D-pair combinations from NHL shift chart data.
+    Checks disk cache first (survives app restarts); falls back to NHL API.
+    n_games: how many of the most recent games to include (default 25).
+    d_pids: frozenset of defenseman player IDs to filter shifts.
+    Returns a list of (pid1, pid2, shared_seconds) sorted by shared TOI desc.
+    """
+    cached = _load_shifts_disk_cache(team_code, n_games)
+    if cached is not None:
+        return cached
+    d_pids_set = set(d_pids) if d_pids else None
+    try:
+        finished = _pairs_fetch_schedule(team_code, n_games)
+        if not finished:
+            return [], "No finished regular-season games found for this team."
+        result = _pairs_run_games(finished, team_code, d_pids_set)
+        _save_shifts_disk_cache(team_code, n_games, result[0], result[1])
+        return result
+    except Exception as e:
+        return [], str(e)
+
+
+def stream_fetch_actual_pairs(team_code, d_pids=None, n_games=25, on_progress=None):
+    """
+    Like fetch_actual_pairs but NOT cached by Streamlit; accepts an
+    on_progress(done, total) callback called after each game.
+
+    Checks disk cache first — if a fresh file exists the result is returned
+    instantly with no API calls and the progress bar is skipped.
+    """
+    cached = _load_shifts_disk_cache(team_code, n_games)
+    if cached is not None:
+        return cached
+    d_pids_set = set(d_pids) if d_pids else None
+    try:
+        finished = _pairs_fetch_schedule(team_code, n_games)
+        if not finished:
+            return [], "No finished regular-season games found for this team."
+        result = _pairs_run_games(finished, team_code, d_pids_set, on_progress=on_progress)
+        _save_shifts_disk_cache(team_code, n_games, result[0], result[1])
+        return result
     except Exception as e:
         return [], str(e)
 
 
 def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
                                     fit_models, player_profiles, has_age,
-                                    feature_names=None, n_games=25):
+                                    feature_names=None, n_games=25,
+                                    _prefetched_pairs=None):
     """
     Build pairing view using ACTUAL NHL pair combinations from shift data.
     Shows the real current pairs with model defensive scores, then inserts
@@ -3457,7 +3682,10 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
 
     # 3. Fetch actual pairs from shift data — pass D-men pids to filter shifts
     d_pids = set(roster_pids.keys()) | {player_id}
-    actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids), n_games=n_games)
+    if _prefetched_pairs is not None:
+        actual_pairs, pair_err = _prefetched_pairs
+    else:
+        actual_pairs, pair_err = fetch_actual_pairs(team_code, d_pids=frozenset(d_pids), n_games=n_games)
 
     SLOT_NAMES      = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]
     MAX_DISPLAY     = 3
@@ -3711,11 +3939,13 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
 
 def def_build_pairing_insertion(player_id, team_code, df, team_ctx,
                              fit_models, player_profiles, has_age,
-                             feature_names=None, n_games=25):
+                             feature_names=None, n_games=25,
+                             _prefetched_pairs=None):
     """Wrapper that calls the actual-pair-based insertion."""
     return build_actual_pairing_insertion(
         player_id, team_code, df, team_ctx,
-        fit_models, player_profiles, has_age, feature_names, n_games=n_games
+        fit_models, player_profiles, has_age, feature_names, n_games=n_games,
+        _prefetched_pairs=_prefetched_pairs,
     )
 
 

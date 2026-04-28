@@ -664,85 +664,6 @@ function exitTour() {
 """
     components.html(_TOUR_HTML, height=0)
 
-    # ── Tab-aware background switcher ─────────────────────────────────────────────
-    # Runs in a zero-height iframe (like the tour above) and accesses the parent
-    # document via window.parent.  A single MutationObserver is registered once
-    # and persists across Streamlit rerenders (stored on window.parent).
-    # On each rerender the iframe re-executes, picks up the latest CSS variable
-    # values (--team-bg-base / --team-bg-override set by apply_team_theme), and
-    # immediately applies the correct gradient for whichever tab is currently active.
-    _TAB_THEME_JS = """<!DOCTYPE html><html>
-<head><style>body{margin:0;background:transparent;}</style></head>
-<body><script>
-(function(){
-  var P = window.parent;
-  var D = P.document;
-  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing', 'Contract Evaluator'];
-
-  function applyTheme() {
-    var style = P.getComputedStyle(D.documentElement);
-    var base = style.getPropertyValue('--team-bg-base').trim();
-    var over = style.getPropertyValue('--team-bg-override').trim();
-    if (!base || base === 'none') {
-      // No team selected — clear to plain dark
-      var app = D.querySelector('.stApp');
-      if (app) app.style.setProperty('background-image', 'none', 'important');
-      return;
-    }
-
-    var tabs = D.querySelectorAll('[role="tab"][aria-selected="true"]');
-    var useOverride = false;
-    for (var i = 0; i < tabs.length; i++) {
-      if (OVERRIDE_TABS.indexOf(tabs[i].textContent.trim()) >= 0) {
-        useOverride = true;
-        break;
-      }
-    }
-
-    var app = D.querySelector('.stApp');
-    if (app) {
-      app.style.setProperty(
-        'background-image',
-        useOverride ? (over || base) : base,
-        'important'
-      );
-    }
-  }
-
-  // ── Observer 1: tab switches (aria-selected changes) ──────────────────────
-  if (!P._teamTabObserver) {
-    P._teamTabObserver = new MutationObserver(applyTheme);
-    P._teamTabObserver.observe(D.body, {
-      subtree: true, attributes: true, attributeFilter: ['aria-selected']
-    });
-  }
-
-  // ── Observer 2: CSS variable updates (<style> tag injected by update_team_colors)
-  // Fires immediately when a player is selected so the gradient shows without
-  // waiting for a tab click.
-  if (!P._teamStyleObserver) {
-    P._teamStyleObserver = new MutationObserver(function(mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var nodes = mutations[i].addedNodes;
-        for (var j = 0; j < nodes.length; j++) {
-          var n = nodes[j];
-          if (n.tagName === 'STYLE' || (n.tagName === 'DIV' && n.querySelector && n.querySelector('style'))) {
-            applyTheme();
-            return;
-          }
-        }
-      }
-    });
-    P._teamStyleObserver.observe(D.head, {childList: true});
-    P._teamStyleObserver.observe(D.body, {childList: true, subtree: false});
-  }
-
-  // Run immediately on each iframe load (catches rerenders)
-  applyTheme();
-})();
-</script></body></html>"""
-    components.html(_TAB_THEME_JS, height=0)
-
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
         st.caption("Search for a forward to see offensive predictions.")
@@ -1221,10 +1142,6 @@ function exitTour() {
                     key="pair_team_sel",
                     on_change=_on_pair_team_change
                 )
-                if pc2.button("Refresh roster & shifts", key="pair_refresh"):
-                    def_fetch_team_roster_d.clear()
-                    fetch_actual_pairs.clear()
-
                 n_games = st.slider(
                     "Games to include in pairing data",
                     min_value=10, max_value=82, value=25, step=5,
@@ -1232,12 +1149,47 @@ function exitTour() {
                     key="pair_games_slider"
                 )
 
-                with st.spinner(f"Fetching {pair_team} shifts ({n_games} games) and building pairings..."):
+                # ── Fetch shift pairs with live progress bar ──────────────────
+                _pair_cache_key = f"_pairs_{pair_team}_{n_games}"
+
+                _do_refresh = pc2.button("Refresh roster & shifts", key="pair_refresh")
+                if _do_refresh:
+                    def_fetch_team_roster_d.clear()
+                    fetch_actual_pairs.clear()
+                    st.session_state.pop(_pair_cache_key, None)
+
+                if _pair_cache_key not in st.session_state:
+                    _prog_label = st.empty()
+                    _prog_bar   = st.progress(0)
+
+                    def _on_game_progress(done, total):
+                        pct = int(done / total * 100)
+                        _prog_label.markdown(
+                            f"<small style='color:#aaa'>Fetching {pair_team} shifts — "
+                            f"game {done} of {total}</small>",
+                            unsafe_allow_html=True,
+                        )
+                        _prog_bar.progress(pct)
+
+                    _fetched = stream_fetch_actual_pairs(
+                        pair_team,
+                        d_pids=None,
+                        n_games=n_games,
+                        on_progress=_on_game_progress,
+                    )
+                    st.session_state[_pair_cache_key] = _fetched
+                    _prog_bar.empty()
+                    _prog_label.empty()
+
+                _prefetched = st.session_state[_pair_cache_key]
+
+                with st.spinner("Building pairing model..."):
                     pair_result = def_build_pairing_insertion(
                         dpred["pid"], pair_team, def_df, def_team_ctx,
                         def_fit_models, def_player_profiles, def_has_age,
                         feature_names=def_fit_feature_names,
-                        n_games=n_games
+                        n_games=n_games,
+                        _prefetched_pairs=_prefetched,
                     )
 
                 if isinstance(pair_result, tuple) and len(pair_result) == 6:
