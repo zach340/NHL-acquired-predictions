@@ -7,3 +7,8 @@ lightgbm
 scikit-learn
 joblib
 requests
+<<<<<<< HEAD
+=======
+gdown
+plotly
+>>>>>>> 8b35a60931876b72b1e307831959eb6d63c9ff21
