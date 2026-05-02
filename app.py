@@ -1942,8 +1942,7 @@ with tab_method:
                 help="In-depth technical documentation: LightGBM details, feature weights, "
                      "residual modeling, cross-validation setup, and training parameters.",
             )
-    st.markdown(
-        """
+    st.markdown(textwrap.dedent("""
         **Analysis & Modeling**
 
         This section explains how the prediction model works — no technical background needed.
@@ -1982,8 +1981,7 @@ with tab_method:
         all calculated strictly from past seasons to avoid giving the model information it
         wouldn't have had at the time.
 
-        
-    *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
+        *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
         represent very different situations. The model accounts for where a player sits on
         the natural career curve and adjusts how it reads their skill signals accordingly.
 
@@ -2016,14 +2014,39 @@ with tab_method:
         ---
 
         **Choices & Limitations**
-        I chose not to include goalies or players who do not play a lot in this data because they don't provide a representative sample for the model's predictions and goalies are a unique case with different performance metrics. another limitation is the random nature of the source. The NHL is a ever changing league so there are underlying factors that can affect the data and make it less stable to predict. PLayers and teams are constantly evolving, which adds to the complexity of the predictions. coaches and schemes can also change, affecting how players perform. so while my models accuracy is good, it's not perfect and there are always other factors to consider. I chose not to include money related data in the contracts because one I did not have time to try and find a free datasource for money data and 2 because each team will evaluate players differently based on their specific needs and circumstances that I do not know enough about to make sure the model is accurate in the predictions.
+
+        Goalies and low-minutes players were excluded from the model because they don't
+        provide a reliable sample for predictions — goalies in particular use entirely
+        different performance metrics. A broader limitation is the inherent unpredictability
+        of the NHL itself. Players and teams are constantly evolving, coaches and systems
+        change, and those shifts can affect performance in ways the model can't fully
+        anticipate. The model's accuracy is strong, but it's not perfect, and there will
+        always be factors outside the data.
+
+        Contract dollar values were also left out. Partly this came down to time — finding
+        a clean, free salary datasource proved difficult — but more fundamentally, each
+        team values players differently based on their own needs and circumstances. Without
+        a reliable way to model that context, adding salary data risked making the
+        contract recommendations less accurate rather than more.
+
         ---
 
         **AI Tool Usage**
 
-        I used claude to help with the code and some model development. because of its ability to generate code and provide insights, it was particularly useful for debugging and optimizing the model. but some of the draw backs was that it did not always capture what exact data was needed and how to best incorporate it. We also did not agree on how best appoach the model so we had to make adjustments manually. because there was a large amount of code needed, claude was a great help in generating the initial code and providing suggestions. I had very limited knoledge in streamlit so claude was a great help in guiding me through the process to creating this app. The main limitation was that it required manual verification and adjustment of the generated code, as well as needing to understande what the end goal should look like. Because in the intial testing the model had created a cap that was failing to capture true performance. So I still need to be able to have knowledge of the underlying data and what the expected output should look like.
-        """
-    )
+        Claude was used throughout development to help with code generation, debugging,
+        and model design. Its ability to produce working code quickly was especially valuable
+        given the volume of Streamlit logic involved, and it was a useful guide for someone
+        with limited prior Streamlit experience.
+
+        That said, there were real limitations. Claude didn't always understand exactly
+        what data was available or how it needed to be structured, which meant generated
+        code often required manual verification and adjustment. There were also points where
+        Claude's suggested approach to the model differed from what the data actually
+        supported — in early testing the model had a performance cap that was suppressing
+        true high-end predictions, and catching that required understanding the underlying
+        data well enough to recognize the problem. AI assistance works best when you still
+        know what the right answer should look like.
+    """))
 # ── Analysis & Findings ───────────────────────────────────────────────────────
 with tab_findings:
     st.subheader("Analysis & Findings")
