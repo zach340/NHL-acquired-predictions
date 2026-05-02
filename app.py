@@ -166,23 +166,27 @@ else:
     )
 
 
-# ── Top-level tabs ────────────────────────────────────────────────────────────
-# ── Hamburger / X toggle CSS ─────────────────────────────────────────────────
+# ── Hamburger / X toggle CSS ─────────────────────────────────────────────────────────
 st.markdown("""
     <style>
         [data-testid="collapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        section[data-testid="stSidebar"] button svg,
         [data-testid="baseButton-headerNoPadding"] svg {
             display: none !important;
         }
-        [data-testid="collapsedControl"]::after {
-            content: "³0";
+        [data-testid="collapsedControl"]::after,
+        [data-testid="stSidebarCollapsedControl"]::after {
+            content: "\\2630";
             font-size: 22px;
             line-height: 1;
+            display: block;
         }
-        [data-testid="baseButton-headerNoPadding"]::after {
-            content: "¹5";
+        section[data-testid="stSidebar"] button[data-testid="baseButton-headerNoPadding"]::after {
+            content: "\\2715";
             font-size: 18px;
             line-height: 1;
+            display: block;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -285,7 +289,7 @@ if (D.getElementById('tc-btn')) return; // already injected on re-render
 
 var style = D.createElement('style');
 style.textContent =
-  '#tc-btn{position:fixed;bottom:24px;right:24px;z-index:99997;' +
+  '#tc-btn{position:fixed;top:16px;right:80px;z-index:99997;' +
     'background:linear-gradient(135deg,#3b82f6,#1d4ed8);' +
     'color:#fff;border:none;padding:11px 22px;border-radius:50px;' +
     'cursor:pointer;font-size:14px;font-weight:700;letter-spacing:.3px;' +
