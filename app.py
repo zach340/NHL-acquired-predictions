@@ -9,6 +9,7 @@ Run with:  python -m streamlit run app.py
 
 import streamlit as st
 import streamlit.components.v1 as components
+import textwrap
 from model_utils import *
 
 # ── Module-level callbacks — must be defined before any widgets ─────────────
