@@ -27,7 +27,7 @@ def _on_contract_team_change():
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
+st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide", initial_sidebar_state="collapsed")
 # Apply theme on every run.
 # player_base_team  = the player's actual team  → always used on non-override tabs
 # active_team       = insertion / pairing / contract team → used only on those tabs
@@ -166,18 +166,46 @@ else:
 
 
 # ── Top-level tabs ────────────────────────────────────────────────────────────
-tab_app, tab_intro, tab_lit, tab_method, tab_findings, tab_conclusion, tab_works = st.tabs([
-    "🏒 NHL Predictor",
-    "Introduction",
-    "Literature Review",
-    "Methodology",
-    "Analysis & Findings",
-    "Conclusion",
-    "Works Cited",
-])
+# ── Hamburger / X toggle CSS ─────────────────────────────────────────────────
+st.markdown("""
+    <style>
+        [data-testid="collapsedControl"] svg,
+        [data-testid="baseButton-headerNoPadding"] svg {
+            display: none !important;
+        }
+        [data-testid="collapsedControl"]::after {
+            content: "³0";
+            font-size: 22px;
+            line-height: 1;
+        }
+        [data-testid="baseButton-headerNoPadding"]::after {
+            content: "¹5";
+            font-size: 18px;
+            line-height: 1;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# ── Sidebar navigation ────────────────────────────────────────────────────────
+with st.sidebar:
+    active_tab = option_menu(
+        menu_title=None,
+        options=[
+            "NHL Predictor",
+            "Introduction",
+            "Literature Review",
+            "Methodology",
+            "Analysis & Findings",
+            "Conclusion",
+            "Works Cited",
+        ],
+        icons=[""] * 7,
+        default_index=0,
+        styles={"icon": {"display": "none"}},
+    )
 
 # ── NHL Predictor (all app content) ──────────────────────────────────────────
-with tab_app:
+if active_tab == "NHL Predictor":
     # ── Pre-build filtered player lists ──────────────────────────────────────────
     # Filter to players active within the last 3 seasons
     _current_season = int(df["season"].max())
@@ -1873,7 +1901,7 @@ function exitTour() {
                                            file_name="def_validation_2025_26.csv", mime="text/csv")
 
 # ── Introduction ─────────────────────────────────────────────────────────────
-with tab_intro:
+if active_tab == "Introduction":
     st.subheader("Introduction")
     st.caption("An abstract and overview of the project.")
     st.markdown(
@@ -1896,7 +1924,7 @@ with tab_intro:
     )
 
 # ── Literature Review ─────────────────────────────────────────────────────────
-with tab_lit:
+if active_tab == "Literature Review":
     st.subheader("Literature Review")
     st.caption("An overview of existing research and sources relevant to this project.")
     st.markdown(
@@ -1915,7 +1943,7 @@ with tab_lit:
     )
 
 # ── Methodology ───────────────────────────────────────────────────────────────
-with tab_method:
+if active_tab == "Methodology":
     st.subheader("Research Methodology")
     st.caption("A walkthrough of the specific techniques and methods used in this project.")
     st.markdown(
@@ -2055,7 +2083,7 @@ with tab_method:
         know what the right answer should look like.
     """))
 # ── Analysis & Findings ───────────────────────────────────────────────────────
-with tab_findings:
+if active_tab == "Analysis & Findings":
     st.subheader("Analysis & Findings")
     st.caption("What was discovered through the analysis.")
     st.markdown(
@@ -2083,7 +2111,7 @@ with tab_findings:
     )
 
 # ── Conclusion ────────────────────────────────────────────────────────────────
-with tab_conclusion:
+if active_tab == "Conclusion":
     st.subheader("Conclusion")
     st.caption("How well the project answers the Research Question and what comes next.")
     st.markdown(
@@ -2110,7 +2138,7 @@ with tab_conclusion:
     )
 
 # ── Works Cited ───────────────────────────────────────────────────────────────
-with tab_works:
+if active_tab == "Works Cited":
     st.subheader("Works Cited")
     st.caption("All sources used for this project in APA or MLA format.")
     st.markdown(
