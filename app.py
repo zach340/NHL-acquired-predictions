@@ -10,6 +10,7 @@ Run with:  python -m streamlit run app.py
 import streamlit as st
 import streamlit.components.v1 as components
 import textwrap
+from streamlit_option_menu import option_menu
 from model_utils import *
 
 # ── Module-level callbacks — must be defined before any widgets ─────────────
@@ -27,21 +28,12 @@ def _on_contract_team_change():
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide")
+st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="wide", initial_sidebar_state="collapsed")
 # Apply theme on every run.
 # player_base_team  = the player's actual team  → always used on non-override tabs
 # active_team       = insertion / pairing / contract team → used only on those tabs
 # The JS observer in _TAB_THEME_JS (injected below) watches aria-selected on tab
 # buttons and swaps between --team-bg-base and --team-bg-override in real time.
-st.markdown("""
-    <style>
-        .block-container {
-            max-width: 860px;
-            padding-left: 2rem;
-            padding-right: 2rem;
-        }
-    </style>
-""", unsafe_allow_html=True)
 apply_team_theme(
     player_team   = st.session_state.get("player_base_team"),
     override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
@@ -165,19 +157,33 @@ else:
     )
 
 
-# ── Top-level tabs ────────────────────────────────────────────────────────────
-tab_app, tab_intro, tab_lit, tab_method, tab_findings, tab_conclusion, tab_works = st.tabs([
-    "🏒 NHL Predictor",
-    "Introduction",
-    "Literature Review",
-    "Methodology",
-    "Analysis & Findings",
-    "Conclusion",
-    "Works Cited",
-])
+# ── Sidebar navigation ───────────────────────────────────────────────────────
+with st.sidebar:
+    active_tab = option_menu(
+        menu_title=None,
+        options=[
+            "NHL Predictor",
+            "Introduction",
+            "Literature Review",
+            "Methodology",
+            "Analysis & Findings",
+            "Conclusion",
+            "Works Cited",
+        ],
+        icons=[
+            "dribbble",
+            "house",
+            "book",
+            "clipboard-data",
+            "bar-chart",
+            "check-circle",
+            "journals",
+        ],
+        default_index=0,
+    )
 
 # ── NHL Predictor (all app content) ──────────────────────────────────────────
-with tab_app:
+if active_tab == "NHL Predictor":
     # ── Pre-build filtered player lists ──────────────────────────────────────────
     # Filter to players active within the last 3 seasons
     _current_season = int(df["season"].max())
@@ -1873,7 +1879,7 @@ function exitTour() {
                                            file_name="def_validation_2025_26.csv", mime="text/csv")
 
 # ── Introduction ─────────────────────────────────────────────────────────────
-with tab_intro:
+if active_tab == "Introduction":
     st.subheader("Introduction")
     st.caption("An abstract and overview of the project.")
     st.markdown(
@@ -1896,7 +1902,7 @@ with tab_intro:
     )
 
 # ── Literature Review ─────────────────────────────────────────────────────────
-with tab_lit:
+if active_tab == "Literature Review":
     st.subheader("Literature Review")
     st.caption("An overview of existing research and sources relevant to this project.")
     st.markdown(
@@ -1915,7 +1921,7 @@ with tab_lit:
     )
 
 # ── Methodology ───────────────────────────────────────────────────────────────
-with tab_method:
+if active_tab == "Methodology":
     st.subheader("Research Methodology")
     st.caption("A walkthrough of the specific techniques and methods used in this project.")
     st.markdown(
@@ -1927,14 +1933,14 @@ with tab_method:
         ---
 
         **Data Collection**
-        This data is from moneypuck.com, fully downloadable data and it is validated using the NHL
-        API. I took the offensive stats that I felt like had the most imporatance or impact on
-        points and goals per game and fed them into the ML model. The data I have is from the
-        2008-2009 season up to 2024-2025. I split the forwards and defensemen into separate datasets becuase I wanted to look for different primary stats so to make sure that the csvs did not take up to much space we cut out the non esitanl stats for both datasets. I also filtered out player who did not reach the minumum nuber of games or minutes played. This is to make sure that I get the players who actually played and were not just part time guys.
+
+        > 📝 *Describe where the data came from (e.g., MoneyPuck, NHL API, ages CSV). Explain how
+        > forwards and defensemen datasets were built and what seasons are included.*
 
         **Data Management**
 
-       Rather than dropping rows with missing values, NAs were converted to zero. Since all features are numerical, a missing stat is functionally equivalent to zero production in that category, and deleting the entire row would have thrown away valid data. Age data was joined to the main dataset using player_id and season as the merge keys, using ID rather than name avoids mismatches from spelling variations and special characters in international players' names. To avoid retraining models on every page load, trained models are saved as .joblib files and loaded directly by the app at runtime.
+        > 📝 *Explain how raw data was cleaned, joined, and stored — including the use of cached
+        > `.joblib` files for trained models to avoid retraining on every app launch.*
 
         ---
         """
@@ -1974,6 +1980,9 @@ with tab_method:
         recent seasons. The model's job is to figure out whether their skills, circumstances,
         and team fit will push them above or below that mark. This keeps the focus on what's
         actually interesting, rather than simply learning that great players score more.
+
+        > *Analogy: instead of predicting a pitcher's ERA, this model predicts whether they'll
+        > outperform or underperform their career norm — and why.*
 
         **What information goes in?**
 
@@ -2055,7 +2064,7 @@ with tab_method:
         know what the right answer should look like.
     """))
 # ── Analysis & Findings ───────────────────────────────────────────────────────
-with tab_findings:
+if active_tab == "Analysis & Findings":
     st.subheader("Analysis & Findings")
     st.caption("What was discovered through the analysis.")
     st.markdown(
@@ -2083,7 +2092,7 @@ with tab_findings:
     )
 
 # ── Conclusion ────────────────────────────────────────────────────────────────
-with tab_conclusion:
+if active_tab == "Conclusion":
     st.subheader("Conclusion")
     st.caption("How well the project answers the Research Question and what comes next.")
     st.markdown(
@@ -2110,7 +2119,7 @@ with tab_conclusion:
     )
 
 # ── Works Cited ───────────────────────────────────────────────────────────────
-with tab_works:
+if active_tab == "Works Cited":
     st.subheader("Works Cited")
     st.caption("All sources used for this project in APA or MLA format.")
     st.markdown(

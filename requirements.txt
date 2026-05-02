@@ -7,3 +7,4 @@ lightgbm
 scikit-learn
 joblib
 requests
+streamlit-option-menu
