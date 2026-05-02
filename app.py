@@ -166,46 +166,12 @@ else:
     )
 
 
-# ── Hamburger / X toggle — JS injection ──────────────────────────────────────
+# ── Hamburger CSS (hides arrows; JS in _TOUR_HTML does the patching) ─────────
 st.markdown("""
     <style>
-        /* Hide the SVG arrows on sidebar toggle buttons */
         [data-testid="collapsedControl"] svg { display:none !important; }
         section[data-testid="stSidebar"] [data-testid="baseButton-headerNoPadding"] svg { display:none !important; }
     </style>
-    <script>
-    (function() {
-        function patchButtons() {
-            // Collapsed toggle (hamburger)
-            var collapsed = document.querySelector('[data-testid="collapsedControl"]');
-            if (collapsed && !collapsed.dataset.patched) {
-                collapsed.dataset.patched = "1";
-                collapsed.style.cssText += "font-size:22px;display:flex;align-items:center;justify-content:center;";
-                var span = document.createElement("span");
-                span.textContent = "\u2630";
-                span.style.cssText = "font-size:22px;line-height:1;pointer-events:none;";
-                collapsed.appendChild(span);
-            }
-            // Open sidebar close button (X)
-            var sidebar = document.querySelector('section[data-testid="stSidebar"]');
-            if (sidebar) {
-                var closeBtn = sidebar.querySelector('[data-testid="baseButton-headerNoPadding"]');
-                if (closeBtn && !closeBtn.dataset.patched) {
-                    closeBtn.dataset.patched = "1";
-                    closeBtn.style.cssText += "font-size:18px;display:flex;align-items:center;justify-content:center;";
-                    var xspan = document.createElement("span");
-                    xspan.textContent = "\u2715";
-                    xspan.style.cssText = "font-size:18px;line-height:1;pointer-events:none;";
-                    closeBtn.appendChild(xspan);
-                }
-            }
-        }
-        // Run immediately and observe for DOM changes
-        patchButtons();
-        var obs = new MutationObserver(patchButtons);
-        obs.observe(document.body, { childList: true, subtree: true });
-    })();
-    </script>
 """, unsafe_allow_html=True)
 
 # ── Sidebar navigation ────────────────────────────────────────────────────────
@@ -303,6 +269,42 @@ var curr = 0;
 var waitPoll = null;
 
 if (D.getElementById('tc-btn')) return; // already injected on re-render
+
+// ── Hamburger / X patcher ────────────────────────────────────────────────────
+function patchSidebarBtns() {
+  // Collapsed sidebar toggle → ☰
+  var coll = D.querySelector('[data-testid="collapsedControl"]');
+  if (coll && !coll.dataset.hPatched) {
+    coll.dataset.hPatched = '1';
+    coll.style.fontSize = '22px';
+    coll.style.display = 'flex';
+    coll.style.alignItems = 'center';
+    coll.style.justifyContent = 'center';
+    var s = D.createElement('span');
+    s.textContent = '\u2630';
+    s.style.cssText = 'font-size:22px;line-height:1;pointer-events:none;';
+    coll.appendChild(s);
+  }
+  // Open sidebar close button → ✕
+  var sb = D.querySelector('section[data-testid="stSidebar"]');
+  if (sb) {
+    var cb = sb.querySelector('[data-testid="baseButton-headerNoPadding"]');
+    if (cb && !cb.dataset.hPatched) {
+      cb.dataset.hPatched = '1';
+      cb.style.fontSize = '18px';
+      cb.style.display = 'flex';
+      cb.style.alignItems = 'center';
+      cb.style.justifyContent = 'center';
+      var x = D.createElement('span');
+      x.textContent = '\u2715';
+      x.style.cssText = 'font-size:18px;line-height:1;pointer-events:none;';
+      cb.appendChild(x);
+    }
+  }
+}
+patchSidebarBtns();
+var hObs = new P.MutationObserver(patchSidebarBtns);
+hObs.observe(D.body, { childList: true, subtree: true });
 
 var style = D.createElement('style');
 style.textContent =
