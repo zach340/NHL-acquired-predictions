@@ -37,7 +37,6 @@ apply_team_theme(
     override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
 )
 st.title("NHL Player Predictor")
-st.caption("Forwards-only mode: defensemen are excluded from training and predictions.")
 
 if "fit_models" not in st.session_state:
     if os.path.exists(CACHE_FILE):
@@ -1928,75 +1927,90 @@ with tab_method:
         > `.joblib` files for trained models to avoid retraining on every app launch.*
 
         ---
+        """
+    )
 
+    # ── Technical breakdown PDF download ─────────────────────────────────────
+    _pdf_path = os.path.join(os.path.dirname(__file__), "analysis_technical.pdf")
+    if os.path.exists(_pdf_path):
+        with open(_pdf_path, "rb") as _pdf_file:
+            st.download_button(
+                label="📄 Technical Breakdown — download full model documentation (PDF)",
+                data=_pdf_file,
+                file_name="analysis_technical.pdf",
+                mime="application/pdf",
+                help="In-depth technical documentation: LightGBM details, feature weights, "
+                     "residual modeling, cross-validation setup, and training parameters.",
+            )
+    st.markdown(
+        """
         **Analysis & Modeling**
 
-        The model uses **LightGBM** (Light Gradient Boosted Machine), a tree-based ensemble
-        algorithm suited for tabular sports data. Two separate model pipelines are trained —
-        one for forwards and one for defensemen — each producing three targets:
-        Points/Game, Goals/Game, and Game Score/Game.
+        This section explains how the prediction model works — no technical background needed.
 
-        **Residual Modeling**
+        ---
 
-        Rather than predicting raw stat values, each model predicts the *residual* — the
-        deviation from a leakage-safe baseline computed from the player's own prior-season
-        history (3-year rolling average, career average, and previous-season value, in that
-        priority order). This means the model focuses its learning capacity on what makes a
-        player outperform or underperform their own historical baseline, rather than learning
-        that good players score more, which it already knows.
+        **What does it do?**
 
-        **Feature Engineering**
+        You give the model a player's history and skill profile, and it estimates how many
+        points, goals, and overall contributions they're likely to generate — both in general
+        and specifically on any of the 32 NHL teams. Separate models are built for forwards
+        and defensemen, since those roles have very different production patterns.
 
-        Features fall into four groups:
+        **What is it actually predicting?**
 
-        *Player skill features* — derived from MoneyPuck shot tracking data. These include
-        finishing skill (goals relative to xG), high-danger shot share, high-danger finishing
-        rate, xG outperformance, primary assist share, on-target rate, and powerplay production
-        metrics (pp ice time %, pp points/60, pp xG/60). Shot danger zones are weighted
-        empirically: high-danger shots are weighted 11.2×, medium-danger 4.1×, and
-        low-danger 1.0×.
+        Rather than predicting a player's raw stat line, the model predicts something more
+        useful: *how much will this player outperform or underperform their own historical
+        baseline?* Every player gets a personal benchmark built from their career history and
+        recent seasons. The model's job is to figure out whether their skills, circumstances,
+        and team fit will push them above or below that mark. This keeps the focus on what's
+        actually interesting, rather than simply learning that great players score more.
 
-        *Career history features* — all computed strictly from prior seasons to prevent data
-        leakage. These include previous-season stats, 3-year rolling means, career means,
-        career peak values, and linear trajectory slopes (both 3-year and full-career) for
-        points, goals, and game score. A player's current percentage of their career peak
-        is also included as a ceiling signal.
+        > *Analogy: instead of predicting a pitcher's ERA, this model predicts whether they'll
+        > outperform or underperform their career norm — and why.*
 
-        *Age features* — included when age data is available. These are age, age-squared
-        (to capture the non-linear career arc), and three interaction terms: age × shot
-        attempts, age × finishing skill, and age × high-danger share. These let the model
-        learn that the same skill level means something different at 25 versus 33.
+        **What information goes in?**
 
-        *Team context features* — built by aggregating teammate statistics at the
-        team-position-season level. These capture how a given team deploys its players:
-        median ice time per game, average adjusted xG/60, high-danger shot share, primary
-        assist rate, on-target rate, and linemate quality (line-level Corsi %, xG%, and
-        high-danger xG/60). At prediction time, these features are swapped out for each of
-        the 32 NHL teams so the model can simulate how a player would perform in a
-        different system.
+        The model draws on four types of information:
 
-        **Two Model Versions**
+        🎯 *Shooting & skill* — How dangerous is this player's shot? How often do they beat
+        goaltenders relative to what's expected? How much do they contribute on the power play?
+        Shots from high-danger areas count far more than perimeter attempts.
 
-        The *Team Fit* model is trained on current-season features paired with current-season
-        targets. It answers: given this player's skill profile today, how would they likely
-        produce on each team right now?
+        📈 *Career history* — What has this player done across their career? Last season,
+        3-year trends, career peaks, and whether they're on an upward or downward trajectory —
+        all calculated strictly from past seasons to avoid giving the model information it
+        wouldn't have had at the time.
 
-        The *Next Season* model is trained on current-season features paired with the
-        *following* season's targets. It adds five trajectory features — year-over-year
-        deltas in points, goals, and game score; games played as a fraction of 82; and
-        career year number — to help it distinguish ascending players from declining ones.
-        The most recent season for each player is excluded from this training set since no
-        future target exists for it.
+        🕐 *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
+        represent very different situations. The model accounts for where a player sits on
+        the natural career curve and adjusts how it reads their skill signals accordingly.
 
-        **Training Process**
+        🏒 *Team & system fit* — How does each team deploy its players? Ice time, line
+        quality, and shot generation all vary by organization. The model can swap in each of
+        the 32 NHL teams at prediction time to simulate how a player would fare in a
+        different system — which is the core trade and signing use case.
 
-        Both models are trained using 3-fold cross-validation to generate performance metrics
-        (MAE, RMSE, and elite-segment MAE for the top 10% of players). The final production
-        model is then retrained on the full dataset. Players with fewer than 20 games played
-        or 300 minutes of ice time are excluded from training. Elite players (top 10th
-        percentile by output) are upweighted 3× during training so the model allocates more
-        capacity to accurately predicting high-end outcomes, which matter most for the trade
-        and signing use case.
+        **Two model versions**
+
+        The *Team Fit* model answers: *given this player's skill profile today, how would
+        they produce on each team right now?* It's trained on current-season skills paired
+        with current-season results and is best for trade deadline and free agency decisions.
+
+        The *Next Season* model answers: *what should we expect from this player next season?*
+        It adds trajectory signals — year-over-year stat changes and career stage — to
+        distinguish ascending players from declining ones. Best for long-term contracts and
+        draft planning.
+
+        **How is it trained and validated?**
+
+        The model is tested by training on some historical seasons and predicting others,
+        rotating three times so every data point gets evaluated — this gives a reliable
+        picture of accuracy before any real predictions are made. A few deliberate design
+        choices ensure it's most precise where it matters most: players with very few games
+        are excluded to avoid noisy samples, and elite players are weighted three times more
+        heavily during training so the model sharpens its predictions exactly where roster
+        decisions are most consequential.
 
         ---
 
