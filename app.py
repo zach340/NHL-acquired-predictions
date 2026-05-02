@@ -1918,14 +1918,14 @@ with tab_method:
         ---
 
         **Data Collection**
-
-        > 📝 *Describe where the data came from (e.g., MoneyPuck, NHL API, ages CSV). Explain how
-        > forwards and defensemen datasets were built and what seasons are included.*
+        This data is from moneypuck.com, fully downloadable data and it is validated using the NHL
+        API. I took the offensive stats that I felt like had the most imporatance or impact on
+        points and goals per game and fed them into the ML model. The data I have is from the
+        2008-2009 season up to 2024-2025. I split the forwards and defensemen into separate datasets becuase I wanted to look for different primary stats so to make sure that the csvs did not take up to much space we cut out the non esitanl stats for both datasets. I also filtered out player who did not reach the minumum nuber of games or minutes played. This is to make sure that I get the players who actually played and were not just part time guys.
 
         **Data Management**
-
-        > 📝 *Explain how raw data was cleaned, joined, and stored — including the use of cached
-        > `.joblib` files for trained models to avoid retraining on every app launch.*
+        
+        For my data when cleaning instaead of dropping all NA rows i converted them to 0 because even if they did not have a stat the whole row should not be deleted and because I am working with numerical stats if it does not exist then it would make sense to get a 0 instead. When using the age data I would match up the players to the corect age using Player id to ensure accuracy.  To make sure that users did not have retreain models on every reload I  created a .joblib file that will store the models and allow the website to access those files for future use.
 
         ---
         """
@@ -1965,9 +1965,6 @@ with tab_method:
         recent seasons. The model's job is to figure out whether their skills, circumstances,
         and team fit will push them above or below that mark. This keeps the focus on what's
         actually interesting, rather than simply learning that great players score more.
-
-        > *Analogy: instead of predicting a pitcher's ERA, this model predicts whether they'll
-        > outperform or underperform their career norm — and why.*
 
         **What information goes in?**
 
