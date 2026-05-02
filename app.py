@@ -33,6 +33,15 @@ st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="
 # active_team       = insertion / pairing / contract team → used only on those tabs
 # The JS observer in _TAB_THEME_JS (injected below) watches aria-selected on tab
 # buttons and swaps between --team-bg-base and --team-bg-override in real time.
+st.markdown("""
+    <style>
+        .block-container {
+            max-width: 860px;
+            padding-left: 2rem;
+            padding-right: 2rem;
+        }
+    </style>
+""", unsafe_allow_html=True)
 apply_team_theme(
     player_team   = st.session_state.get("player_base_team"),
     override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
@@ -1924,8 +1933,8 @@ with tab_method:
         2008-2009 season up to 2024-2025. I split the forwards and defensemen into separate datasets becuase I wanted to look for different primary stats so to make sure that the csvs did not take up to much space we cut out the non esitanl stats for both datasets. I also filtered out player who did not reach the minumum nuber of games or minutes played. This is to make sure that I get the players who actually played and were not just part time guys.
 
         **Data Management**
-        
-        For my data when cleaning instaead of dropping all NA rows i converted them to 0 because even if they did not have a stat the whole row should not be deleted and because I am working with numerical stats if it does not exist then it would make sense to get a 0 instead. When using the age data I would match up the players to the corect age using Player id to ensure accuracy.  To make sure that users did not have retreain models on every reload I  created a .joblib file that will store the models and allow the website to access those files for future use.
+
+       Rather than dropping rows with missing values, NAs were converted to zero. Since all features are numerical, a missing stat is functionally equivalent to zero production in that category, and deleting the entire row would have thrown away valid data. Age data was joined to the main dataset using player_id and season as the merge keys, using ID rather than name avoids mismatches from spelling variations and special characters in international players' names. To avoid retraining models on every page load, trained models are saved as .joblib files and loaded directly by the app at runtime.
 
         ---
         """
