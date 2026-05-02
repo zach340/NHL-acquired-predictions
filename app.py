@@ -1973,20 +1973,21 @@ with tab_method:
 
         The model draws on four types of information:
 
-        🎯 *Shooting & skill* — How dangerous is this player's shot? How often do they beat
+        *Shooting & skill* — How dangerous is this player's shot? How often do they beat
         goaltenders relative to what's expected? How much do they contribute on the power play?
         Shots from high-danger areas count far more than perimeter attempts.
 
-        📈 *Career history* — What has this player done across their career? Last season,
+        *Career history* — What has this player done across their career? Last season,
         3-year trends, career peaks, and whether they're on an upward or downward trajectory —
         all calculated strictly from past seasons to avoid giving the model information it
         wouldn't have had at the time.
 
-        🕐 *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
+        
+    *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
         represent very different situations. The model accounts for where a player sits on
         the natural career curve and adjusts how it reads their skill signals accordingly.
 
-        🏒 *Team & system fit* — How does each team deploy its players? Ice time, line
+        *Team & system fit* — How does each team deploy its players? Ice time, line
         quality, and shot generation all vary by organization. The model can swap in each of
         the 32 NHL teams at prediction time to simulate how a player would fare in a
         different system — which is the core trade and signing use case.
@@ -2015,17 +2016,12 @@ with tab_method:
         ---
 
         **Choices & Limitations**
-
-        > 📝 *Document decisions like forwards-only vs defensemen split, exclusion of goalies,
-        > handling of mid-season trades, and any other scope constraints you made.*
-
+        I chose not to include goalies or players who do not play a lot in this data because they don't provide a representative sample for the model's predictions and goalies are a unique case with different performance metrics. another limitation is the random nature of the source. The NHL is a ever changing league so there are underlying factors that can affect the data and make it less stable to predict. PLayers and teams are constantly evolving, which adds to the complexity of the predictions. coaches and schemes can also change, affecting how players perform. so while my models accuracy is good, it's not perfect and there are always other factors to consider. I chose not to include money related data in the contracts because one I did not have time to try and find a free datasource for money data and 2 because each team will evaluate players differently based on their specific needs and circumstances that I do not know enough about to make sure the model is accurate in the predictions.
         ---
 
         **AI Tool Usage**
 
-        > 📝 *If you used AI tools (e.g., Claude, ChatGPT, GitHub Copilot) during development,
-        > reflect here on how you used them, what you delegated vs. did yourself,
-        > what worked and what didn't, and what you learned about your process.*
+        I used claude to help with the code and some model development. because of its ability to generate code and provide insights, it was particularly useful for debugging and optimizing the model. but some of the draw backs was that it did not always capture what exact data was needed and how to best incorporate it. We also did not agree on how best appoach the model so we had to make adjustments manually. because there was a large amount of code needed, claude was a great help in generating the initial code and providing suggestions. I had very limited knoledge in streamlit so claude was a great help in guiding me through the process to creating this app. The main limitation was that it required manual verification and adjustment of the generated code, as well as needing to understande what the end goal should look like. Because in the intial testing the model had created a cap that was failing to capture true performance. So I still need to be able to have knowledge of the underlying data and what the expected output should look like.
         """
     )
 # ── Analysis & Findings ───────────────────────────────────────────────────────
