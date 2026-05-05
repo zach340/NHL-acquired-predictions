@@ -36,11 +36,40 @@ st.set_page_config(page_title="NHL Player Predictor", page_icon="🏒", layout="
 # buttons and swaps between --team-bg-base and --team-bg-override in real time.
 st.markdown("""
     <style>
+        /* Force the app to scroll internally so position:fixed works in HF Spaces */
+        html, body {
+            height: 100vh !important;
+            overflow: hidden !important;
+        }
+        .main {
+            height: 100vh !important;
+            overflow-y: auto !important;
+        }
         .block-container {
             max-width: 860px;
             padding-left: 2rem;
             padding-right: 2rem;
+            padding-top: 3rem;
         }
+        /* Pin hamburger button — now truly fixed since page scrolls internally */
+        [data-testid="collapsedControl"] {
+            position: fixed !important;
+            top: 10px !important;
+            left: 10px !important;
+            z-index: 999999 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            background: rgba(30,30,30,0.85) !important;
+            border-radius: 8px !important;
+            padding: 6px 10px !important;
+        }
+        [data-testid="collapsedControl"] svg {
+            display: block !important;
+            color: white !important;
+            fill: white !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="baseButton-headerNoPadding"] svg { display:none !important; }
     </style>
 """, unsafe_allow_html=True)
 apply_team_theme(
@@ -170,7 +199,6 @@ else:
 st.markdown("""
     <style>
         [data-testid="collapsedControl"] svg { display:none !important; }
-        section[data-testid="stSidebar"] [data-testid="baseButton-headerNoPadding"] svg { display:none !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -359,7 +387,9 @@ var ALL_TOURS = {
       title: 'Offensive Tab &#x2694;&#xFE0F;',
       text: "This is your hub for evaluating NHL forwards. Everything here is powered by a LightGBM model trained on MoneyPuck shot-tracking data.",
       pos: 'below' },
-    { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+    { find: function(){
+        return findSelectByLabel('forward');
+      },
       title: 'Player Search &#x1F50D;',
       text: "Type any part of a forward's name &#x2014; partial names work fine. The dropdown auto-completes from the full player database.",
       pos: 'below' },
@@ -382,19 +412,21 @@ var ALL_TOURS = {
       title: 'Defensive Tab &#x1F6E1;&#xFE0F;',
       text: "This is your hub for evaluating NHL defensemen. The model automatically classifies each D-man as Defensive D, Offensive D, or Two-Way D.",
       pos: 'below' },
-    { find: function(){ return D.querySelector('[data-baseweb="select"]') || D.querySelector('.stSelectbox'); },
+    { find: function(){
+        return findSelectByLabel('defenseman');
+      },
       title: 'Defenseman Search &#x1F50D;',
       text: "Type any part of a defenseman's name here. Once selected, the player's archetype and stat grades appear automatically.",
       pos: 'below' },
-    { find: function(){ return subTabByText('Team Fit'); },
+    { find: function(){ return firstVisibleTab('Team Fit'); },
       title: 'Team Fit &#x1F4CA;',
       text: "Shows defensive grade (hits, takeaways, xGA, PIM) and offensive grade across all 32 teams. Use this to find the best organizational fit.",
       pos: 'below' },
-    { find: function(){ return subTabByText('Next Season'); },
+    { find: function(){ return firstVisibleTab('Next Season'); },
       title: 'Next Season &#x1F4C8;',
       text: "Multi-year defensive forecast using age curves specific to defensemen, who peak and decline on a different timeline than forwards.",
       pos: 'below' },
-    { find: function(){ return subTabByText('Pairing'); },
+    { find: function(){ return firstVisibleTab('Pairing'); },
       title: 'Pairing Tool &#x1F91D;',
       text: "Pick any NHL team to see the full defensive depth chart after inserting this player. Pairs are anchored by real shift data. A &#x1F91D; icon means opposite-hand pairing &#x2014; generally preferred by coaches. Download the full chart as a CSV.",
       pos: 'below' }
@@ -538,6 +570,45 @@ function subTabByText(t) {
       || all.find(function(b){ return b.textContent.includes(t); });
 }
 
+// Walk up to body checking display:none, visibility:hidden and aria-hidden.
+// getBoundingClientRect alone is unreliable: Streamlit can use visibility:hidden
+// or aria-hidden on inactive tab panels, leaving the rect non-zero.
+function isTrulyVisible(el) {
+  var cur = el;
+  while (cur && cur !== D.body) {
+    if (cur.getAttribute('aria-hidden') === 'true') return false;
+    if (cur.hasAttribute('hidden')) return false;
+    var cs = P.getComputedStyle(cur);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    cur = cur.parentElement;
+  }
+  var r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+}
+
+// Find the Streamlit selectbox whose label contains needleText AND is visible.
+// Targets [data-testid="stSelectbox"] (the full widget) rather than
+// [data-baseweb="select"] (just the inner trigger) for reliable dimensions.
+function findSelectByLabel(needleText) {
+  var lc = needleText.toLowerCase();
+  return Array.from(D.querySelectorAll('[data-testid="stSelectbox"]')).find(function(box) {
+    var lbl = box.querySelector('label');
+    return lbl && lbl.textContent.toLowerCase().includes(lc) && isTrulyVisible(box);
+  }) || firstVisible('[data-testid="stSelectbox"]');
+}
+
+// First element matching CSS selector that passes the full visibility check.
+function firstVisible(selector) {
+  return Array.from(D.querySelectorAll(selector)).find(isTrulyVisible) || null;
+}
+
+// First tab button whose text matches AND whose ancestors are all visible.
+function firstVisibleTab(text) {
+  return Array.from(D.querySelectorAll('button[role="tab"]')).find(function(b) {
+    return b.textContent.trim().includes(text) && isTrulyVisible(b);
+  }) || null;
+}
+
 // Allow Escape key to exit tour
 D.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && D.getElementById('tc-card') &&
@@ -617,6 +688,13 @@ function renderStep(el, step, i) {
   }
 
   var sp = D.getElementById('tc-spot');
+  // Safety: skip elements that are hidden or collapsed to the top-left corner.
+  // Hidden Streamlit tab panels can report non-zero width/height but sit at (0,0).
+  if ((r.width === 0 && r.height === 0) || (r.top < 40 && r.left < 10 && r.height < 20)) {
+    console.warn('[Tour] step element appears hidden or at origin, skipping');
+    if (i < STEPS.length - 1) { curr = i + 1; showStep(curr); } else exitTour();
+    return;
+  }
   sp.style.display = 'block';
   sp.style.top    = (r.top    - PAD) + 'px';
   sp.style.left   = (r.left   - PAD) + 'px';
@@ -1167,6 +1245,7 @@ function exitTour() {
                     st.markdown("**Offensive**")
                     for cat, (val, pct) in _off_breakdown.items():
                         _pct_bar(cat, val, pct)
+
                 st.markdown("#### Rankings Table")
                 display = def_show_results_table(dpred["fit_results"], dpred["actual_team"])
                 csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
@@ -1180,8 +1259,132 @@ function exitTour() {
             elif not pred:
                 st.info("Search for a defenseman above.")
             elif dpred:
-                st.subheader(f"{dpred['matched']}  —  D  |  {dpred['actual_team']}")
-                st.caption("Next-season defensive forecast based on current profile and trajectory.")
+                _d2_seasons_str = " → ".join(str(s) for s in dpred["seasons"])
+                _d2_age         = dpred.get("age")
+                _d2_age_str     = (
+                    f"  |  Age {_d2_age:.0f} → {_d2_age+1:.0f}"
+                    if _d2_age is not None and pd.notna(_d2_age) else ""
+                )
+
+                # ── Player headshot + header ─────────────────────────────────
+                _d2_img, _d2_hdr = st.columns([1, 8])
+                with _d2_img:
+                    st.markdown(get_player_headshot_html(pred["pid"]), unsafe_allow_html=True)
+                with _d2_hdr:
+                    st.subheader(
+                        f"{dpred['matched']}  —  D  |  {dpred['actual_team']}{_d2_age_str}"
+                    )
+                    st.caption("Next-season defensive forecast based on current profile and trajectory.")
+
+                # ── Grade helpers (local copies so def_t2 is self-contained) ─
+                def _d2_score_to_grade(s):
+                    if s >= 90: return "A"
+                    if s >= 75: return "B+"
+                    if s >= 50: return "B"
+                    if s >= 35: return "C+"
+                    if s >= 20: return "C"
+                    return "D"
+
+                def _d2_pct_bar(label, val, pct, lower_is_better=False):
+                    color = (
+                        "#FFD700" if pct >= 90 else
+                        "#4a90d9" if pct >= 75 else
+                        "#57a85a" if pct >= 50 else
+                        "#e8a838" if pct >= 35 else
+                        "#c8102e"
+                    )
+                    arrow = "↓ lower is better" if lower_is_better else ""
+                    if lower_is_better:
+                        pct_label = f"Top {100-pct:.0f}%" if pct <= 90 else "Elite"
+                    else:
+                        pct_label = f"{pct:.0f}th%"
+                    st.markdown(
+                        f"**{label}** &nbsp; `{val}` &nbsp; — &nbsp; "
+                        f"<span style='color:{color}'>**{pct_label}**</span> "
+                        f"<span style='color:#888;font-size:0.8em'>{arrow}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.progress(int(pct))
+
+                _d2_lib_cats = {"xGA/60 (5v5)", "PIM/GP"}
+
+                # ── Compute grades from next_results ─────────────────────────
+                _d2_next_is_actual = dpred["next_results"][dpred["next_results"]["is_actual"]]
+                _d2_next_sample = (
+                    _d2_next_is_actual.iloc[0].to_dict()
+                    if not _d2_next_is_actual.empty
+                    else dpred["next_results"].iloc[0].to_dict()
+                )
+                _d2_def_grade, _d2_def_score, _, _d2_def_bkdn = grade_defensive_defenseman(
+                    _d2_next_sample, season_def_df=def_df
+                )
+                _d2_off_grade, _d2_off_score, _, _d2_off_bkdn = (
+                    grade_offensive_defenseman(_pid_off, season_off_df=_d_off_df)
+                    if _pid_off else ("—", 0, "", {})
+                )
+                _d2_combined = _d2_def_score * 0.5 + _d2_off_score * 0.5
+
+                # ── Grade metrics ─────────────────────────────────────────────
+                _d2_type, _ = classify_defenseman_type(
+                    dict(def_player_profiles[pred["pid"]][0])
+                    if pred["pid"] in def_player_profiles else _d2_next_sample,
+                    def_score=_d2_def_score, off_score=_d2_off_score,
+                )
+                if _d2_type == "Offensive D":
+                    nd1, nd2, nd3 = st.columns(3)
+                    nd1.metric("Offensive Grade",  _d2_off_grade,                        f"Top {100-_d2_off_score:.0f}%")
+                    nd2.metric("Defensive Grade",  _d2_def_grade,                        f"Top {100-_d2_def_score:.0f}%")
+                    nd3.metric("Combined Grade",   _d2_score_to_grade(_d2_combined),     f"Top {100-_d2_combined:.0f}%")
+                else:  # Defensive D or Two-Way D
+                    nd1, nd2, nd3 = st.columns(3)
+                    nd1.metric("Defensive Grade",  _d2_def_grade,                        f"Top {100-_d2_def_score:.0f}%")
+                    nd2.metric("Offensive Grade",  _d2_off_grade if _pid_off else "—",   f"Top {100-_d2_off_score:.0f}%" if _pid_off else "")
+                    nd3.metric("Combined Grade",   _d2_score_to_grade(_d2_combined),     f"Top {100-_d2_combined:.0f}%")
+
+                # ── Per-category percentile breakdown ─────────────────────────
+                st.markdown("#### Category Breakdown")
+
+                st.markdown("**Next-Season Defensive Projection**")
+                for cat, (val, pct) in _d2_def_bkdn.items():
+                    _d2_pct_bar(cat, val, pct, lower_is_better=(cat in _d2_lib_cats))
+
+                if _pid_off and _d2_off_bkdn:
+                    st.markdown("**Offensive**")
+                    for cat, (val, pct) in _d2_off_bkdn.items():
+                        _d2_pct_bar(cat, val, pct)
+
+                # ── Age trajectory ────────────────────────────────────────────
+                _d2_profile = def_player_profiles.get(pred["pid"])
+                if (
+                    _d2_profile is not None
+                    and def_has_age
+                    and _d2_age is not None
+                    and pd.notna(_d2_age)
+                ):
+                    _d2_p = _d2_profile[0]
+                    st.markdown("**Age Trajectory**")
+                    _d2_peak = float(_d2_p.get("career_peak_hits_pg", 0) or 0)
+                    _d2_pct_peak = float(_d2_p.get("pct_of_peak_hits", 0) or 0)
+                    if _d2_peak > 0:
+                        st.markdown(
+                            f"**Career Peak (Hits/GP)** &nbsp; `{_d2_peak:.3f}` &nbsp; — &nbsp; "
+                            f"Currently at `{_d2_pct_peak*100:.0f}%` of peak",
+                            unsafe_allow_html=True,
+                        )
+                    _d2_slope = float(_d2_p.get("recent_3yr_hits_slope", 0) or 0)
+                    _d2_slope_color = "#57a85a" if _d2_slope >= 0 else "#c8102e"
+                    _d2_slope_label = (
+                        "▲ ascending" if _d2_slope > 0.01
+                        else ("▼ declining" if _d2_slope < -0.01 else "→ stable")
+                    )
+                    st.markdown(
+                        f"**3-Year Trend** &nbsp; "
+                        f"<span style='color:{_d2_slope_color}'>**{_d2_slope_label}**</span> "
+                        f"(`{_d2_slope:+.3f}` hits/gp per season)",
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Rankings Table ────────────────────────────────────────────
                 st.markdown("#### Rankings Table")
                 display = def_show_results_table(dpred["next_results"], dpred["actual_team"])
                 csv = display.drop(columns="_is_actual").to_csv(index_label="rank")
@@ -1930,18 +2133,15 @@ if active_tab == "Introduction":
     st.caption("An abstract and overview of the project.")
     st.markdown(
         """
-        This project is a tool to be used by NHL GMs, fantasy hockey players, 
-        and hockey analytics enthusiasts to predict player performance and value across teams. 
-        It uses a machine learning model trained on historical NHL data to predict offensive production for forwards 
-        and defensive impact for defensemen. The tool includes a player search interface, 
-        a contract evaluator that projects future performance based on age curves, and a validation 
-        section that compares model predictions against live NHL API stats from the current season.
-
+        For this project I wanted to build something that could actually help answer a question that I think a lot of hockey fans and even front offices are not fully sure how to approach, which is how accurately can historical NHL data predict offensive performance for forwards and defensive impact for defensemen and how can those predictions be used to project how a player might perform if they were to change teams.
+        
+        The reason I wanted to focus on this specifically is because I think there is a lot of uncertainty around how a player is going to perform when they change teams and while the numbers can tell us a lot they do not always give us the full picture, so I wanted to see if building a model around historical data could help close that gap.
+        
+        The tool is designed to be used by NHL GMs, fantasy hockey players, and anyone who is into hockey analytics because I wanted it to be something that felt useful across different types of people who care about the game in different ways. It uses a machine learning model trained on historical NHL data to predict performance for any player so that when a trade or signing happens the data is already there to project how they are going to do in a new context. It also includes a contract evaluator that takes those projections and uses age curves to assess whether a player's performance is actually worth what they are being paid, which I thought was important to add because predicting performance only tells part of the story if you are a GM or a fantasy player trying to make a decision. On top of that there is a player search interface and a validation section that compares the model's predictions against live NHL API data from the current season so you can see how well it is actually working.
         ---
 
         **Project:** NHL Player Predictor
-        Research Question: *How do changing teams affect offensive performance over 
-        a season and how does their stats before being traded or signing predict how they will do with their new team?*
+        How accurately can historical NHL data predict offensive performance for forwards and defensive impact for defensemen, and how can those predictions be used to project how a player might perform if they were to change teams?
 
 
         """
@@ -1953,16 +2153,15 @@ if active_tab == "Literature Review":
     st.caption("An overview of existing research and sources relevant to this project.")
     st.markdown(
         """
-        some examples are NHL EDGE stats: Rantanen’s outlook after trade to Hurricanes | NHL.com, Hockey Analytics – 
-        Getting data directly from the NHL Api – Hockey-Statistics, 
-        and  abeck2309/nhl-trade-roi-xgar: Evaluating NHL trades using realized and expected xGAR. T
-        hese websites use some data analytics to look at how the new teams will perform with trades. 
-        The Rantanen post has good depth about how they performed at their old team but lacks the future projections that could be extracted.
-        The Hockey Analytics article is a good way to get data directly from NHL and how to build different ways to scrape the NHL website 
-        for its data without having to worry about some of the finer details. This is like AAZZAZRON/TradeTracker: A Discord bot that scrapes
-         Sportsnet to find the most recent NHL trades and signings which scrapes Sportsnet which is the Canadian version of ESPN and imports
-         the details of trades and signings. This is a little out of scope right now for me but would be good for the future when looking 
-         for financial impacts.
+        There is actually a decent amount of work out there that touches on different pieces of what this project is trying to do, even if nothing does all of it together in one place.
+        
+        The most directly relevant starting point is the NHL EDGE stats breakdown of Mikko Rantanen's outlook after his trade to the Hurricanes published on NHL.com. What I liked about this piece is that it goes pretty deep on how Rantanen performed with Colorado and what his underlying numbers looked like before the trade. The abeck2309 NHL trade ROI project connects to this well because it takes that same idea and builds a model around it, using realized and expected goals above replacement to put an actual number on whether a trade worked out. The problem with both of them though is they are looking backwards at what already happened and neither one is projecting how a player is going to do going forward in a new system with new linemates, which is exactly the gap this project is trying to close.
+        
+        On the data side, the Hockey Analytics article on pulling data directly from the NHL API was really useful because it walks through how to actually get the data without having to worry about a lot of the finer details of scraping. This connects to something like the AAZZAZRON TradeTracker project which is a Discord bot that scrapes Sportsnet to pull in recent trade and signing details automatically. That one is a little out of scope for where the project is right now but is worth keeping in mind for future versions when financial data becomes more important.
+        
+        The most important thing to note is that all of this data needs to be validated and cleaned before it can be used in the model. This is where the NHL API comes in, as it provides a reliable source of real-time data that can be used to verify the accuracy of the historical data.
+        
+        Beyond those specific sources there is a broader body of hockey analytics research that is relevant here. Work on expected goals models and wins above replacement in hockey has shown that raw counting stats like goals and assists do not always tell the full story of how valuable a player actually is, which is part of why this project focuses on underlying production metrics rather than just point totals. There is also research on how team context affects individual performance, specifically how linemates, zone deployment, and coaching systems can inflate or suppress a player's numbers in ways that make it hard to project them into a new situation. This is the core challenge the model is trying to account for. Finally there is existing work on age curves in hockey which shows that forwards typically peak in their mid-twenties and decline gradually after that, which is the foundation for how the contract evaluator in this project works.
         """
     )
 
@@ -1970,27 +2169,27 @@ if active_tab == "Literature Review":
 if active_tab == "Methodology":
     st.subheader("Research Methodology")
     st.caption("A walkthrough of the specific techniques and methods used in this project.")
-    st.markdown(
-        """
-        *This section describes the specific techniques and methods used, connecting methodology
-        directly to the Research Question. It includes methods of data collection, analysis, and
-        the choices made to refine or limit the project.*
+    
+    st.markdown("""
+    *This section describes the specific techniques and methods used, connecting methodology
+    directly to the Research Question. It includes methods of data collection, analysis, and
+    the choices made to refine or limit the project.*
+    """)
 
-        ---
+    st.markdown("---")
+    st.markdown("#### Data Collection")
+    st.markdown("""
+    The data for this project comes from moneypuck.com which has fully downloadable historical NHL data going back to the 2008-2009 season all the way up to 2024-2025, and I validated it using the NHL API to make sure what I was working with was accurate. Moneypuck also provides lines data which I used to better understand the context of each player's performance, and it does have up to date stats available as well, but I chose not to include those yet because I wanted to see how the model performed on historical data first and then use the API to validate those predictions before adding anything else.
 
-        **Data Collection**
-        This data is from moneypuck.com, fully downloadable data and it is validated using the NHL
-        API. I took the offensive stats that I felt like had the most imporatance or impact on
-        points and goals per game and fed them into the ML model. The data I have is from the
-        2008-2009 season up to 2024-2025. I split the forwards and defensemen into separate datasets becuase I wanted to look for different primary stats so to make sure that the csvs did not take up to much space we cut out the non esitanl stats for both datasets. I also filtered out player who did not reach the minumum nuber of games or minutes played. This is to make sure that I get the players who actually played and were not just part time guys.
+    I split forwards and defensemen into separate datasets because they have very different roles and I wanted to look for different primary stats for each, so keeping them together would have made the model less accurate and would have added a lot of stats that were not relevant to what I was actually trying to predict. From there I pulled out the offensive stats that I felt had the most impact on points and goals per game and fed those into the model, cutting out anything that was not essential so the datasets stayed manageable. I also filtered out players who did not reach a minimum number of games or minutes played because I wanted to make sure I was only working with players who actually had a real sample size and not guys who only played a handful of games.
+    """)
 
-        **Data Management**
+    st.markdown("#### Data Management")
+    st.markdown("""
+    One thing I had to figure out early on was what to do with missing values in the data. Rather than just dropping those rows entirely I converted any NAs to zero because since all the features are numerical a missing stat is basically the same as zero production in that category, and deleting the whole row would have thrown away a lot of valid data that was still useful. I also joined age data to the main dataset using player ID and season as the merge keys rather than player name because names can have spelling variations and special characters especially for international players, so using the ID just made it cleaner and avoided mismatches. To keep the app running smoothly I also saved the trained models as joblib files so they load directly at runtime instead of retraining every single time someone opens the page.
+    """)
 
-       Rather than dropping rows with missing values, NAs were converted to zero. Since all features are numerical, a missing stat is functionally equivalent to zero production in that category, and deleting the entire row would have thrown away valid data. Age data was joined to the main dataset using player_id and season as the merge keys, using ID rather than name avoids mismatches from spelling variations and special characters in international players' names. To avoid retraining models on every page load, trained models are saved as .joblib files and loaded directly by the app at runtime.
-
-        ---
-        """
-    )
+    st.markdown("---")
 
     # ── Technical breakdown PDF download ─────────────────────────────────────
     _pdf_path = os.path.join(os.path.dirname(__file__), "analysis_technical.pdf")
@@ -2004,189 +2203,171 @@ if active_tab == "Methodology":
                 help="In-depth technical documentation: LightGBM details, feature weights, "
                      "residual modeling, cross-validation setup, and training parameters.",
             )
-    st.markdown(textwrap.dedent("""
-        **Analysis & Modeling**
 
-        This section explains how the prediction model works — no technical background needed.
+    st.markdown("#### Analysis & Modeling")
+    st.markdown("""
+                This section explains how the prediction model works and you do not need a technical background to follow along, and if you do want the more technical side of things you can download the PDF above.
+                """)
+    st.markdown("**What does it do?**")
+    st.markdown("""
+                You put in a player's history and skill profile and the model estimates how many points, goals, and overall contributions they are likely to put up, both in general and specifically on any of the 32 NHL teams. I built separate models for forwards and defensemen because they have very different roles and I wanted to make sure the model was actually looking for the right things for each.
+                """)
+    st.markdown("**What is it actually predicting?**")
+    st.markdown("""
+                Rather than just predicting a raw stat line the model is trying to figure out something more useful, which is whether a player is going to outperform or underperform their own historical baseline. Every player gets a personal benchmark built from their career history and recent seasons and the model's job is to figure out whether their skills and team fit are going to push them above or below that mark. I thought this was a better approach than just predicting that good players score more which is not really telling you anything useful.
+                """)
+    st.markdown("**What information goes in?**")
+    st.markdown("""
+                The model pulls from four main areas. First is shooting and skill, so how dangerous is this player's shot, how often are they beating goalies relative to what you would expect, and how much are they contributing on the power play. Second is career history, so what have they done across their career, what did last season look like, and whether they are trending up or down. Third is age and career stage because a 25 year old and a 33 year old with the same stats are in very different situations and the model accounts for that. Fourth is team and system fit because ice time, line quality, and shot generation all vary a lot by organization and the model can swap in any of the 32 teams to simulate how a player would do in a different system, which is really the core of what makes this useful for trades and signings.
+                """)
+    st.markdown("**Two model versions**")
+    st.markdown("""
+                The Team Fit model is for right now. You give it a player's current skill profile and it tells you how they would produce on each team today, so it is best for trade deadline and free agency decisions. The Next Season model is for planning ahead because it adds trajectory signals like year over year stat changes to figure out whether a player is still improving or starting to decline, which makes it better for long term contracts and draft planning.
+                """)
 
-        ---
+    st.markdown("**How does it work?**")
+    st.markdown("""
+                The model uses machine learning algorithms to analyze the input data and identify patterns and relationships. It then applies these patterns to make predictions about future performance.
+                """)
+    st.markdown("**How is it trained and validated?**")
+    st.markdown("""
+                The model gets tested by training on some historical seasons and predicting others, rotating three times so every data point gets a chance to be evaluated. I also made a few deliberate choices to make sure it is most accurate where it actually matters, so players with very few games are left out to avoid noisy samples and elite players are weighted more heavily during training so the model gets sharper at the predictions that actually affect roster decisions the most.
+                """)
+    st.markdown("---")
+    st.markdown("#### Choices & Limitations")
+    st.markdown("""Goalies and low-minutes players were excluded from the model because they don't
+    provide a reliable sample for predictions — goalies in particular use entirely
+    different performance metrics. A broader limitation is the inherent unpredictability
+    of the NHL itself. Players and teams are constantly evolving, coaches and systems
+    change, and those shifts can affect performance in ways the model can't fully
+    anticipate. The model's accuracy is strong, but it's not perfect, and there will
+    always be factors outside the data.
 
-        **What does it do?**
+    Contract dollar values were also left out. Partly this came down to time — finding
+    a clean, free salary datasource proved difficult — but more fundamentally, each
+    team values players differently based on their own needs and circumstances. Without
+    a reliable way to model that context, adding salary data risked making the
+    contract recommendations less accurate rather than more.
+    """)
 
-        You give the model a player's history and skill profile, and it estimates how many
-        points, goals, and overall contributions they're likely to generate — both in general
-        and specifically on any of the 32 NHL teams. Separate models are built for forwards
-        and defensemen, since those roles have very different production patterns.
+    st.markdown("---")
+    st.markdown("#### AI Tool Usage")
+    st.markdown("""
+    Claude was used throughout development to help with code generation, debugging,
+    and model design. Its ability to produce working code quickly was especially valuable
+    given the volume of Streamlit logic involved, and it was a useful guide for someone
+    with limited prior Streamlit experience.
 
-        **What is it actually predicting?**
-
-        Rather than predicting a player's raw stat line, the model predicts something more
-        useful: *how much will this player outperform or underperform their own historical
-        baseline?* Every player gets a personal benchmark built from their career history and
-        recent seasons. The model's job is to figure out whether their skills, circumstances,
-        and team fit will push them above or below that mark. This keeps the focus on what's
-        actually interesting, rather than simply learning that great players score more.
-
-        **What information goes in?**
-
-        The model draws on four types of information:
-
-        *Shooting & skill* — How dangerous is this player's shot? How often do they beat
-        goaltenders relative to what's expected? How much do they contribute on the power play?
-        Shots from high-danger areas count far more than perimeter attempts.
-
-        *Career history* — What has this player done across their career? Last season,
-        3-year trends, career peaks, and whether they're on an upward or downward trajectory —
-        all calculated strictly from past seasons to avoid giving the model information it
-        wouldn't have had at the time.
-
-        *Age & career stage* — A 25-year-old and a 33-year-old with identical stats
-        represent very different situations. The model accounts for where a player sits on
-        the natural career curve and adjusts how it reads their skill signals accordingly.
-
-        *Team & system fit* — How does each team deploy its players? Ice time, line
-        quality, and shot generation all vary by organization. The model can swap in each of
-        the 32 NHL teams at prediction time to simulate how a player would fare in a
-        different system — which is the core trade and signing use case.
-
-        **Two model versions**
-
-        The *Team Fit* model answers: *given this player's skill profile today, how would
-        they produce on each team right now?* It's trained on current-season skills paired
-        with current-season results and is best for trade deadline and free agency decisions.
-
-        The *Next Season* model answers: *what should we expect from this player next season?*
-        It adds trajectory signals — year-over-year stat changes and career stage — to
-        distinguish ascending players from declining ones. Best for long-term contracts and
-        draft planning.
-
-        **How is it trained and validated?**
-
-        The model is tested by training on some historical seasons and predicting others,
-        rotating three times so every data point gets evaluated — this gives a reliable
-        picture of accuracy before any real predictions are made. A few deliberate design
-        choices ensure it's most precise where it matters most: players with very few games
-        are excluded to avoid noisy samples, and elite players are weighted three times more
-        heavily during training so the model sharpens its predictions exactly where roster
-        decisions are most consequential.
-
-        ---
-
-        **Choices & Limitations**
-
-        Goalies and low-minutes players were excluded from the model because they don't
-        provide a reliable sample for predictions — goalies in particular use entirely
-        different performance metrics. A broader limitation is the inherent unpredictability
-        of the NHL itself. Players and teams are constantly evolving, coaches and systems
-        change, and those shifts can affect performance in ways the model can't fully
-        anticipate. The model's accuracy is strong, but it's not perfect, and there will
-        always be factors outside the data.
-
-        Contract dollar values were also left out. Partly this came down to time — finding
-        a clean, free salary datasource proved difficult — but more fundamentally, each
-        team values players differently based on their own needs and circumstances. Without
-        a reliable way to model that context, adding salary data risked making the
-        contract recommendations less accurate rather than more.
-
-        ---
-
-        **AI Tool Usage**
-
-        Claude was used throughout development to help with code generation, debugging,
-        and model design. Its ability to produce working code quickly was especially valuable
-        given the volume of Streamlit logic involved, and it was a useful guide for someone
-        with limited prior Streamlit experience.
-
-        That said, there were real limitations. Claude didn't always understand exactly
-        what data was available or how it needed to be structured, which meant generated
-        code often required manual verification and adjustment. There were also points where
-        Claude's suggested approach to the model differed from what the data actually
-        supported — in early testing the model had a performance cap that was suppressing
-        true high-end predictions, and catching that required understanding the underlying
-        data well enough to recognize the problem. AI assistance works best when you still
-        know what the right answer should look like.
-    """))
-# ── Analysis & Findings ───────────────────────────────────────────────────────
+    That said, there were real limitations. Claude didn't always understand exactly
+    what data was available or how it needed to be structured, which meant generated
+    code often required manual verification and adjustment. There were also points where
+    Claude's suggested approach to the model differed from what the data actually
+    supported — in early testing the model had a performance cap that was suppressing
+    true high-end predictions, and catching that required understanding the underlying
+    data well enough to recognize the problem. AI assistance works best when you still
+    know what the right answer should look like.
+    """)
 if active_tab == "Analysis & Findings":
     st.subheader("Analysis & Findings")
     st.caption("What was discovered through the analysis.")
-    st.markdown(
-        """
-        *This section walks through what was learned and discovered. Visualizations of results
-        (charts, graphs, tables) should be included and discussed here.*
 
-        ---
+    st.markdown("#### Key Findings")
+    st.markdown("""
+    Overall I think the model performed pretty well. Across 427 matched players the Points/GP MAE came in at 0.123 and the Goals/GP MAE came in at 0.074 which means on average the model is off by about an eighth of a point per game on points and less than a tenth of a goal per game on goals. For a model trying to predict individual player production across an entire season I think that is a solid result.
 
-        **Key Findings**
+    The prediction spread ratio came in at 95% which means the model is generating predictions that cover a realistic range rather than just clustering everything in the middle, and the calibration slope of 0.90 means it is tracking pretty closely with how players actually performed with just a slight tendency to be conservative on the higher end.
+    """)
 
-        > Describe the model's performance metrics (MAE for Points/GP, Goals/GP, Hits/GP, etc.).
-        > Reference validation results from the Validation tab and discuss what they mean.
+    st.markdown("#### Elite Player Predictions")
+    st.markdown("""
+    The trickiest part of the model was predicting elite players and that shows up in the numbers. For the top 9% of players the Points/GP MAE goes up to 0.154 with a bias of -0.102, and the Goals/GP MAE goes up to 0.105 with a bias of -0.075. The negative bias means the model is consistently undershooting on elite players which makes sense because truly elite production is harder to predict from historical data alone. This is something I would want to improve in future versions, but given that elite players were already weighted three times more heavily during training I think this is about as good as you can get without adding more contextual data.
+    """)
 
-        **Visualizations**
+    st.markdown("#### Defensive Metrics")
+    st.markdown("""
+    Looking at the scatter plots the model does best on Hits/Game with an MAE of 0.258 and a correlation of 0.89 which is really strong and shows the model is picking up on physical play patterns well. Takeaways/Game and PIM/Game were harder to predict with correlations of 0.60 and 0.58 respectively, which honestly makes sense because those stats are a lot more random and situational than something like hits. A player can take a penalty or win a puck battle in ways that are hard to predict from historical trends alone so I was not too surprised to see the model struggle a bit more there.
+    """)
 
-        > Insert and discuss any charts or figures here. You can embed Streamlit visuals
-        > directly in this section or reference the ones available in the NHL Predictor tab.
-
-        **Surprises & Anomalies**
-
-        > Discuss any unexpected results — players the model consistently over- or under-predicts,
-        > team effects that stand out, or patterns in the elite segment analysis.
-        """
-    )
-
+    st.markdown("#### Surprises & Anomalies")
+    st.markdown("""
+    The biggest surprise was how well the model handled the spread of predictions. I was worried early on that it was going to cluster everything around the mean and not really differentiate between players, which is a common problem with this type of model. The 95% prediction spread ratio shows that it is not doing that which I think is the most important thing to get right if you actually want to use this for roster decisions. The elite underprediction is the main thing I would flag as something to keep an eye on because if you are a GM trying to evaluate a superstar trade that bias could matter.
+    """)
 # ── Conclusion ────────────────────────────────────────────────────────────────
 if active_tab == "Conclusion":
     st.subheader("Conclusion")
-    st.caption("How well the project answers the Research Question and what comes next.")
-    st.markdown(
-        """
+    st.caption("A summary of what was built and what it means.")
 
-        ---
+    st.markdown("""
+    Going back to the original research question of how accurately can historical NHL data predict player performance and how can those predictions be used to project how a player might perform if they change teams, I think the honest answer is that this project does not answer that question directly but instead builds something that lets anyone answer it themselves.
+    """)
 
-        **Does the model answer the Research Question?**
+    st.markdown("""
+    What I built is a tool that takes a player's historical data and gives you a projection of how they would perform on any of the 32 NHL teams right now or going into next season. On top of that the contract evaluator takes those performance projections and uses the player's age curve to project how long a contract should be, which I think is one of the most practically useful parts of the whole app because knowing how a player will perform is only half the decision. The other half is figuring out how long you can count on that level of production, and that is what the contract side is trying to help with.
+    """)
 
-        > Summarize how accurately the NHL Player Predictor forecasts player performance and
-        > value across teams and seasons. What are its strengths? Where does it fall short?
+    st.markdown("""
+    So rather than me running a single study on one trade and calling the question answered, anyone using this app can plug in any player and get that answer for whatever situation they are actually looking at. I think that is more useful in practice because the question is going to look different depending on whether you are a GM at the trade deadline, a fantasy player making a pickup, or just someone curious about what would happen if a player switched teams.
+    """)
 
-        **Contributions**
-
-        > What does this project add to sports analytics? How could GMs, fantasy players, or
-        > researchers use these predictions?
-
-        **Future Directions**
-
-        > What new questions has this project raised? Ideas might include: adding goalie models,
-        > incorporating salary cap data, extending to playoff performance, or building a
-        > real-time trade analyzer.
-        """
-    )
+    st.markdown("""
+    The model's validation results show that it is accurate enough to be genuinely useful and the elite player underprediction is something I would want to keep working on. But the foundation is there and the goal from the start was to build something that could be a real tool for real decisions, and I think that is what it is.
+    """)
 
 # ── Works Cited ───────────────────────────────────────────────────────────────
 if active_tab == "Works Cited":
     st.subheader("Works Cited")
-    st.caption("All sources used for this project in APA or MLA format.")
+    st.caption("Sources used throughout this project.")
+
+    # MLA 9th edition — one flat alphabetical list, hanging-indent style via HTML.
+    _cite = (
+        "<p style='margin:0 0 1.1em 0; padding-left:2em; text-indent:-2em; "
+        "font-size:15px; line-height:1.6;'>{}</p>"
+    )
+
     st.markdown(
-        """
-        *List all sources below. Include direct links to online sources.*
-
-        ---
-
-        > **Replace this placeholder with your actual citations.**
-
-        ---
-
-        - MoneyPuck.com — player-level NHL statistics dataset.  
-          [https://moneypuck.com/data.htm](https://moneypuck.com/data.htm)
-
-        - NHL Stats API — real-time and historical player/team data.  
-          [https://api-web.nhle.com/](https://api-web.nhle.com/)
-
-        - Scikit-learn documentation — machine learning library used for model training.  
-          [https://scikit-learn.org/stable/](https://scikit-learn.org/stable/)
-
-        - Streamlit documentation — framework used to build this application.  
-          [https://docs.streamlit.io/](https://docs.streamlit.io/)
-
-        - *(Add additional citations here in APA or MLA format.)*
-        """
+        # 1. AAZZAZRON (AA)
+        _cite.format(
+            "AAZZAZRON. \"TradeTracker: A Discord Bot That Scrapes Sportsnet to Find "
+            "the Most Recent NHL Trades and Signings.\" <em>GitHub</em>, "
+            "<a href='https://github.com/AAZZAZRON/TradeTracker'>"
+            "github.com/AAZZAZRON/TradeTracker</a>. Accessed 2025."
+        ) +
+        # 2. abeck2309 (AB)
+        _cite.format(
+            "abeck2309. \"nhl-trade-roi-xgar: Evaluating NHL Trades Using Realized "
+            "and Expected xGAR.\" <em>GitHub</em>, "
+            "<a href='https://github.com/abeck2309/nhl-trade-roi-xgar'>"
+            "github.com/abeck2309/nhl-trade-roi-xgar</a>. Accessed 2025."
+        ) +
+        # 3. Anthropic (AN)
+        _cite.format(
+            "Anthropic. <em>Claude</em>, version claude-sonnet-4-20250514, "
+            "Anthropic, 2025, "
+            "<a href='https://claude.ai'>claude.ai</a>. Accessed 2025."
+        ) +
+        # 4. "Hockey Analytics..." (H)
+        _cite.format(
+            "\"Hockey Analytics &ndash; Getting Data Directly from the NHL API.\" "
+            "<em>Hockey-Statistics</em>, 14 May 2025, "
+            "<a href='https://hockey-statistics.com/2025/05/14/hockey-analytics-getting-data-directly-from-the-nhl-api/'>"
+            "hockey-statistics.com/2025/05/14/hockey-analytics-getting-data-directly-from-the-nhl-api/</a>."
+        ) +
+        # 5. MoneyPuck (M)
+        _cite.format(
+            "MoneyPuck. \"MoneyPuck.com.\" <em>MoneyPuck</em>, "
+            "<a href='https://moneypuck.com'>moneypuck.com</a>. Accessed 2025."
+        ) +
+        # 6. National Hockey League (NA)
+        _cite.format(
+            "National Hockey League. \"NHL Stats API.\" <em>NHL</em>, "
+            "<a href='https://api-web.nhle.com'>api-web.nhle.com</a>. Accessed 2025."
+        ) +
+        # 7. "NHL EDGE Stats..." (NH)
+        _cite.format(
+            "\"NHL EDGE Stats: Rantanen's Outlook after Trade to Hurricanes.\" "
+            "<em>NHL</em>, "
+            "<a href='https://www.nhl.com/news/edge-stats-impact-of-trade-on-mikko-rantanen-martin-necas'>"
+            "www.nhl.com/news/edge-stats-impact-of-trade-on-mikko-rantanen-martin-necas</a>. Accessed 2025."
+        ),
+        unsafe_allow_html=True,
     )
