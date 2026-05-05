@@ -1095,7 +1095,7 @@ def _make_roster_tab_js_html() -> str:
   /* All team gradients baked in — no round-trip to Python required. */
   var GRADS = {grad_json};
 
-  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing'];
+  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing', 'Contract Evaluator'];
 
   function isRosterActive() {{
     return Array.from(D.querySelectorAll('button[role="tab"]')).some(function(t) {{
@@ -3406,8 +3406,8 @@ def def_fetch_team_roster_d(team_code):
                 "shoots":       p.get("shootsCatches", ""),  # "L" or "R"
             })
         return players
-    except Exception:
-        return []
+    except Exception as e:
+        return [{"_error": str(e)}]
 
 
 
@@ -3600,7 +3600,10 @@ def build_actual_pairing_insertion(player_id, team_code, df, team_ctx,
     # 1. Fetch current roster and actual pair combinations
     roster = def_fetch_team_roster_d(team_code)
     if not roster:
-        return [], [], {}, [], [], {"pair_err": "Could not fetch roster.", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
+        return [], [], {}, [], [], {"pair_err": "Could not fetch roster (empty response).", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
+    if roster and "_error" in roster[0]:
+        err_msg = roster[0]["_error"]
+        return [], [], {}, [], [], {"pair_err": f"Could not fetch roster: {err_msg}", "partner_name": "—", "partner_slot": "—", "searched_score": 0, "actual_pairs": []}
 
     roster_pids  = {p["player_id"]: p["player_name"] for p in roster}
     roster_shoots = {p["player_id"]: p.get("shoots", "") for p in roster}

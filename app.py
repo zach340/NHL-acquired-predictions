@@ -803,6 +803,82 @@ function exitTour() {
 """
     components.html(_TOUR_HTML, height=0)
 
+    # ── Outer-tab persistence via sessionStorage ──────────────────────────────────
+    # apply_team_theme() (model_utils.py) makes a conditional st.markdown() call
+    # whose presence depends on whether player_base_team is set. That shifts the
+    # widget-position counter, giving the outer st.tabs a new element ID on first
+    # player selection — React resets it to tab 0 (Offensive).
+    # Fix: JS saves the active outer tab to sessionStorage on every click and
+    # immediately restores it after each Streamlit rerun, before the browser paints,
+    # so the user never sees a flash back to the Offensive tab.
+    _TAB_PERSIST_HTML = """
+<!DOCTYPE html>
+<html><head><style>body{margin:0;background:transparent;}</style></head>
+<body>
+<script>
+(function(){
+  var P = window.parent, D = P.document;
+  var KEY = 'nhp_outer_tab';
+  var OUTER = ['Offensive','Defensive','Contract Evaluator','Models','Validation'];
+
+  function outerTabBtns() {
+    return Array.from(D.querySelectorAll('button[role="tab"]')).filter(function(b){
+      return OUTER.indexOf(b.textContent.trim()) >= 0;
+    });
+  }
+
+  var restoring = false;
+  function restore() {
+    if (restoring) return;
+    var saved = sessionStorage.getItem(KEY);
+    if (!saved) return;
+    var target = outerTabBtns().find(function(b){ return b.textContent.trim() === saved; });
+    if (target && target.getAttribute('aria-selected') !== 'true') {
+      restoring = true;
+      target.click();
+      setTimeout(function(){ restoring = false; }, 600);
+    }
+  }
+
+  // Save the clicked tab IMMEDIATELY (synchronously) so that when the
+  // MutationObserver fires restore() in the same event loop tick, it
+  // already sees the correct saved value and does nothing.
+  // Using setTimeout here was the bug: restore() fired via rAF before
+  // the delayed save ran, read the stale previous-tab value, and clicked
+  // back to Offensive — visible as the page jumping before names appeared.
+  var tagged = new WeakSet();
+  function attachSave() {
+    outerTabBtns().forEach(function(b){
+      if (!tagged.has(b)) {
+        tagged.add(b);
+        b.addEventListener('click', function(){
+          sessionStorage.setItem(KEY, b.textContent.trim());
+        });
+      }
+    });
+  }
+
+  // After each Streamlit rerun, restore the correct tab before the next paint
+  var pending = false;
+  var obs = new MutationObserver(function(){
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function(){
+      pending = false;
+      attachSave();
+      restore();
+    });
+  });
+  obs.observe(D.body, { childList: true, subtree: true });
+
+  // Initial run
+  setTimeout(function(){ attachSave(); restore(); }, 600);
+})();
+</script>
+</body></html>
+"""
+    components.html(_TAB_PERSIST_HTML, height=0)
+
     # ── Offensive (nested) ────────────────────────────────────────────────────────
     with tab_off:
         st.caption("Search for a forward to see offensive predictions.")
@@ -813,30 +889,40 @@ function exitTour() {
         if not off_input:
             st.session_state.pop("active_team", None)      # reset to black when cleared
             st.session_state.pop("player_base_team", None)
+
+        # ── Stable placeholder for error / traded-banner ──────────────────────
+        # Routing all conditional pre-tab content through a single st.empty()
+        # slot keeps st.tabs() at a fixed position in the widget tree so
+        # Streamlit never resets the active sub-tab on player selection.
+        _off_above_tabs = st.empty()
+
+        off_t1, off_t2, off_t3 = st.tabs(["Team Fit", "Next Season", "Roster Insertion"])
+
         if off_input:
             first = predict_player(off_input, df, team_ctx, fit_models, next_models,
                                    player_profiles, has_age)
             if first is None:
-                st.error(f"No forward found matching '{off_input}'.")
+                _off_above_tabs.error(f"No forward found matching '{off_input}'.")
             elif first["traded_teams"]:
                 _banner_team = st.session_state.get("off_team_override", first["traded_teams"][-1])
                 _bg  = get_team_color(_banner_team, "primary")
                 _brd = get_team_color(_banner_team, "secondary")
                 _r, _g, _b = int(_bg[1:3], 16), int(_bg[3:5], 16), int(_bg[5:7], 16)
                 _txt = "#111111" if (0.299*_r + 0.587*_g + 0.114*_b) / 255 > 0.5 else "#ffffff"
-                st.markdown(
-                    f"""<div style="background:{_bg};border-left:5px solid {_brd};
-                        padding:12px 16px;border-radius:6px;color:{_txt};
-                        font-size:15px;margin-bottom:8px;">
-                        🔁 <strong>{first['matched']}</strong> was traded in {first['seasons'][0]}.
-                        Select their current team:
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
-                override_team = st.radio(
-                    "Current team", options=first["traded_teams"],
-                    horizontal=True, key="off_team_override"
-                )
+                with _off_above_tabs.container():
+                    st.markdown(
+                        f"""<div style="background:{_bg};border-left:5px solid {_brd};
+                            padding:12px 16px;border-radius:6px;color:{_txt};
+                            font-size:15px;margin-bottom:8px;">
+                            🔁 <strong>{first['matched']}</strong> was traded in {first['seasons'][0]}.
+                            Select their current team:
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                    override_team = st.radio(
+                        "Current team", options=first["traded_teams"],
+                        horizontal=True, key="off_team_override"
+                    )
                 pred = predict_player(off_input, df, team_ctx, fit_models, next_models,
                                       player_profiles, has_age, override_team=override_team)
                 if pred:
@@ -866,8 +952,6 @@ function exitTour() {
                         player_team   = pred.get("actual_team"),
                         override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
                     )
-
-        off_t1, off_t2, off_t3 = st.tabs(["Team Fit", "Next Season", "Roster Insertion"])
 
         with off_t1:
             if pred and pred.get("fit_results") is not None:
@@ -1096,26 +1180,35 @@ function exitTour() {
             def_input = st.selectbox("Search for a defenseman", options=[""] + _def_names,
                                      index=0, key="def_player_input", format_func=_fmt_def)
 
-        def_pred_input = None
-        dpred          = None
+        def_pred_input     = None
+        dpred              = None
+        _def_colors_kwargs = None   # deferred — called AFTER st.tabs() below
+        _def_first         = None   # held so dpred can be cached after st.tabs()
+
+        # ── Stable placeholder for error message ──────────────────────────────
+        # Keeps def_t1/def_t2/def_t3 at a fixed widget-tree position.
+        # update_team_colors() (→ st.markdown) and st.spinner() are deliberately
+        # deferred to AFTER the st.tabs() call so no conditional widget can shift
+        # the inner-tabs' element-ID between reruns.
+        _def_above_tabs = st.empty()
 
         if def_models_loaded and def_input:
-            def_first = def_predict_defenseman(
+            _def_first = def_predict_defenseman(
                 def_input, def_df, def_team_ctx,
                 def_fit_models, def_next_models, def_player_profiles, def_has_age,
                 fit_feature_names=def_fit_feature_names,
                 next_feature_names=def_next_feature_names,
                 season_df=def_df
             )
-            if def_first is None:
-                st.error(f"No defenseman found matching '{def_input}'.")
+            if _def_first is None:
+                _def_above_tabs.error(f"No defenseman found matching '{def_input}'.")
             else:
                 def_pred_input = {
-                    "pid":          def_first["pid"],
-                    "matched":      def_first["matched"],
-                    "actual_team":  def_first["actual_team"],
+                    "pid":          _def_first["pid"],
+                    "matched":      _def_first["matched"],
+                    "actual_team":  _def_first["actual_team"],
                     "position":     "D",
-                    "seasons":      def_first["seasons"],
+                    "seasons":      _def_first["seasons"],
                     "traded_teams": [],
                     "fit_results":  None,
                     "next_results": None,
@@ -1134,17 +1227,17 @@ function exitTour() {
                     st.session_state["player_base_team"] = def_pred_input.get("actual_team")
                     if not st.session_state.get("_team_override"):
                         st.session_state["active_team"] = def_pred_input.get("actual_team")
-                    update_team_colors(
+                    # Store args — update_team_colors() is called after st.tabs()
+                    _def_colors_kwargs = dict(
                         player_team   = def_pred_input.get("actual_team"),
                         override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
                     )
 
-
-                _dpred_key = f"dpred_{def_first['pid']}"
-                if _dpred_key not in st.session_state:
-                    with st.spinner("Computing defensive predictions..."):
-                        st.session_state[_dpred_key] = def_first
-                dpred = st.session_state[_dpred_key]
+                # Cache dpred immediately if already computed; otherwise defer
+                _dpred_key = f"dpred_{_def_first['pid']}"
+                if _dpred_key in st.session_state:
+                    dpred = st.session_state[_dpred_key]
+                # (deferred case handled after st.tabs() below)
 
         # Use def_pred_input as the local pred alias for defensive tab logic
         pred = def_pred_input
@@ -1153,7 +1246,22 @@ function exitTour() {
         _d_off_stats, _d_off_df, _d_off_err = load_defensive_offensive_stats() if def_models_loaded else ({}, None, None)
         _pid_off = _d_off_stats.get(pred["pid"], {}) if pred else {}
 
+        # ── Inner tabs — always at the same widget-tree position ──────────────
         def_t1, def_t2, def_t3 = st.tabs(["Team Fit", "Next Season", "Pairing"])
+
+        # ── Post-tabs: emit the deferred CSS update and cache dpred ──────────
+        # These render below the tab widget in the DOM (invisible <style> tag +
+        # momentary spinner). Placing them here rather than above st.tabs()
+        # ensures the inner tabs always have a stable element-ID across reruns.
+        if _def_colors_kwargs is not None:
+            update_team_colors(**_def_colors_kwargs)
+        if _def_first is not None:
+            _dpred_key = f"dpred_{_def_first['pid']}"
+            if _dpred_key not in st.session_state:
+                with st.spinner("Computing defensive predictions..."):
+                    st.session_state[_dpred_key] = _def_first
+            if dpred is None:
+                dpred = st.session_state[_dpred_key]
 
         with def_t1:
             if not def_models_loaded:
@@ -1659,10 +1767,13 @@ function exitTour() {
                         st.session_state["player_base_team"] = pred.get("actual_team")
                         if not st.session_state.get("_team_override"):
                             st.session_state["active_team"] = pred.get("actual_team")
-                        update_team_colors(
-                            player_team   = pred.get("actual_team"),
-                            override_team = st.session_state.get("active_team") if st.session_state.get("_team_override") else None,
-                        )
+                        # The JS watcher only uses --team-bg-override for Roster
+                        # Insertion / Pairing inner tabs. Contract Evaluator always
+                        # falls back to --team-bg-base, so we put the display team
+                        # (signing team when overridden, actual team otherwise)
+                        # into player_team so it lands in --team-bg-base.
+                        _ct_bg = st.session_state.get("active_team", pred.get("actual_team"))
+                        update_team_colors(player_team=_ct_bg, override_team=_ct_bg)
             elif def_models_loaded:
                 def_c = def_predict_defenseman(
                     contract_input, def_df, def_team_ctx,
@@ -1678,6 +1789,20 @@ function exitTour() {
                         "seasons": def_c["seasons"], "traded_teams": [],
                         "fit_results": None, "next_results": None, "age": None,
                     }
+                    # Mirror the forward branch: update session state and team
+                    # background for defensemen so the page background loads.
+                    if st.session_state.get("_contract_pid") != pred.get("pid"):
+                        st.session_state["_contract_pid"]       = pred.get("pid")
+                        st.session_state["_last_player_source"] = "contract"
+                        st.session_state["_team_override"]      = False
+                        for _k in ("insertion_team", "pair_team_sel", "contract_team"):
+                            st.session_state.pop(_k, None)
+                    if st.session_state.get("_last_player_source") == "contract":
+                        st.session_state["player_base_team"] = pred.get("actual_team")
+                        if not st.session_state.get("_team_override"):
+                            st.session_state["active_team"] = pred.get("actual_team")
+                        _ct_bg = st.session_state.get("active_team", pred.get("actual_team"))
+                        update_team_colors(player_team=_ct_bg, override_team=_ct_bg)
                 else:
                     st.error(f"No player found matching '{contract_input}'.")
             else:
