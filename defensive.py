@@ -62,48 +62,50 @@ FIVEONFIVE_COLS = [
     "on_ice_for_expected_goals",
 ]
 
-# ── Helper: load chunks filtered to a specific situation ──────────────────────
+# ── Helper: load all three situations in a single pass over the file ──────────
 
-def load_situation(situation, usecols_extra):
-    needed = GROUP + ["situation", "game_id"] + usecols_extra
-    # Only keep columns that exist in file
-    chunks = []
-    first  = True
-    avail  = None
+SITUATIONS = ["all", "4on5", "5on5"]
 
-    for chunk in pd.read_csv(INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE):
-        if first:
-            avail  = set(chunk.columns)
-            needed = [c for c in needed if c in avail]
-            first  = False
-        chunk  = chunk[needed]
+def load_all_situations():
+    needed = GROUP + ["situation", "game_id"] + ALL_COLS + PK_COLS + FIVEONFIVE_COLS
+    header_cols = pd.read_csv(INPUT_FILE, nrows=0).columns
+    needed = [c for c in dict.fromkeys(needed) if c in header_cols]
+
+    buckets = {situation: [] for situation in SITUATIONS}
+    n_chunks = 0
+
+    for chunk in pd.read_csv(INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE, usecols=needed):
         # Filter to defensemen first — discard all forward/goalie rows immediately
-        chunk  = chunk[chunk["position"] == "D"]
+        chunk = chunk[chunk["position"] == "D"]
         if chunk.empty:
             continue
         chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
-        chunk  = chunk[chunk["situation"] == situation]
-        if chunk.empty:
-            continue
-        chunk  = chunk.fillna(0)
-        chunks.append(chunk)
-        print(f"  [{situation}] chunk processed — {len(chunks)} so far", end="\r")
+        chunk = chunk.fillna(0)
+        for situation in SITUATIONS:
+            sit_chunk = chunk[chunk["situation"] == situation]
+            if not sit_chunk.empty:
+                buckets[situation].append(sit_chunk)
+        n_chunks += 1
+        print(f"  chunk {n_chunks} processed", end="\r")
 
-    if not chunks:
-        return pd.DataFrame()
-    df = pd.concat(chunks, ignore_index=True)
-    print(f"\n  [{situation}] {len(df):,} rows loaded")
-    return df
+    result = {
+        situation: (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame())
+        for situation, rows in buckets.items()
+    }
+    print()
+    for situation, df in result.items():
+        print(f"  [{situation}] {len(df):,} rows loaded")
+    return result
 
 
-# ── Step 1: Load all-situation data ───────────────────────────────────────────
+# ── Step 1: Load all situations in one pass over the file ─────────────────────
 
-print("── Loading all-situation data ────────────────────────────────")
-df_all = load_situation("all", ALL_COLS)
+print("── Loading defensive game-level data ─────────────────────────")
+situation_dfs = load_all_situations()
 
-# Defensemen only
+df_all = situation_dfs["all"]
 df_all = df_all[df_all["position"] == "D"].copy()
-print(f"  Filtered to defensemen: {len(df_all):,} rows")
+print(f"\n  Filtered to defensemen: {len(df_all):,} rows")
 
 # True games_played from unique game_ids
 gp = (
@@ -118,10 +120,9 @@ all_agg_cols = [c for c in ALL_COLS if c in df_all.columns]
 all_agg = df_all.groupby(GROUP)[all_agg_cols].sum().reset_index()
 all_agg = all_agg.merge(gp, on=GROUP, how="left")
 
-# ── Step 2: Load penalty kill (4on5) data ────────────────────────────────────
+# ── Step 2: Penalty kill (4on5) data ─────────────────────────────────────────
 
-print("\n── Loading penalty kill (4on5) data ─────────────────────────")
-df_pk = load_situation("4on5", PK_COLS)
+df_pk = situation_dfs["4on5"]
 
 if not df_pk.empty:
     df_pk = df_pk[df_pk["position"] == "D"].copy()
@@ -134,10 +135,9 @@ if not df_pk.empty:
 else:
     pk_agg = pd.DataFrame(columns=GROUP + ["pk_ice_time"])
 
-# ── Step 3: Load 5on5 on-ice defensive data ───────────────────────────────────
+# ── Step 3: 5on5 on-ice defensive data ────────────────────────────────────────
 
-print("\n── Loading 5on5 on-ice data ──────────────────────────────────")
-df_5v5 = load_situation("5on5", FIVEONFIVE_COLS)
+df_5v5 = situation_dfs["5on5"]
 
 if not df_5v5.empty:
     df_5v5 = df_5v5[df_5v5["position"] == "D"].copy()

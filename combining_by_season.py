@@ -24,36 +24,9 @@ HD_WEIGHT = 11.2
 MD_WEIGHT = 4.1
 LD_WEIGHT = 1.0
 
-# ── Load and filter to all-situation ──────────────────────────────────────────
-
-print("── Loading game-level data ──────────────────────────────────")
-chunks = []
-for i, chunk in enumerate(pd.read_csv(
-    INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE
-)):
-    chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
-    chunks.append(chunk[chunk["situation"] == "all"])
-    print(f"  Chunk {i+1} processed", end="\r")
-
-df = pd.concat(chunks, ignore_index=True)
-df = df.fillna(0)
-print(f"\n  {len(df):,} all-situation game-level rows")
-
-# ── Aggregate to season level ──────────────────────────────────────────────────
-
-print("\n── Aggregating to season level ──────────────────────────────")
-
 GROUP = ["player_id", "player_name", "season", "player_team", "position"]
 
-# Count unique game_ids for true games_played
-game_counts = (
-    df.groupby(GROUP)["game_id"]
-    .nunique()
-    .reset_index()
-    .rename(columns={"game_id": "games_played"})
-)
-
-# Sum all counting stats
+# Counting stats we need summed to season level
 COUNT_COLS = [
     "ice_time",
     "shifts",
@@ -83,7 +56,38 @@ COUNT_COLS = [
     "ind_high_danger_expected_goals",
 ]
 
-# Only sum columns that exist in the file
+# ── Load and filter to all-situation ──────────────────────────────────────────
+
+print("── Loading game-level data ──────────────────────────────────")
+
+header_cols = pd.read_csv(INPUT_FILE, nrows=0).columns
+usecols = [c for c in GROUP + ["situation", "game_id"] + COUNT_COLS if c in header_cols]
+
+chunks = []
+for i, chunk in enumerate(pd.read_csv(
+    INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE, usecols=usecols
+)):
+    chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
+    chunks.append(chunk[chunk["situation"] == "all"])
+    print(f"  Chunk {i+1} processed", end="\r")
+
+df = pd.concat(chunks, ignore_index=True)
+df = df.fillna(0)
+print(f"\n  {len(df):,} all-situation game-level rows")
+
+# ── Aggregate to season level ──────────────────────────────────────────────────
+
+print("\n── Aggregating to season level ──────────────────────────────")
+
+# Count unique game_ids for true games_played
+game_counts = (
+    df.groupby(GROUP)["game_id"]
+    .nunique()
+    .reset_index()
+    .rename(columns={"game_id": "games_played"})
+)
+
+# Only sum columns that actually made it into the file
 COUNT_COLS = [c for c in COUNT_COLS if c in df.columns]
 
 season = (
