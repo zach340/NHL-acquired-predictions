@@ -7,16 +7,18 @@ to season level for joining onto the main training dataset.
 Usage:
     python extract_linemate_features.py
 
-Input:  lines.csv                          (raw MoneyPuck lines data)
-        offensive_performance_by_season_per60_renamed.csv  (main dataset)
+Input:  every CSV in raw_data/line_level/  (raw MoneyPuck lines data —
+                                            drop a new season's file in there to include it)
+        season_dataset.csv                (main dataset, for the player_id/name/team/season join)
 Output: linemate_features.csv             (season-level linemate quality)
 """
 
 import pandas as pd
 import numpy as np
 
-LINES_FILE  = "2008_to_2024_lines.csv"
-MAIN_FILE   = "offensive_performance_by_season_per60_renamed.csv"
+from data_sources import LINE_LEVEL_DIR, line_level_files, iter_csv_chunks
+
+MAIN_FILE   = "season_dataset.csv"
 OUTPUT_FILE = "linemate_features.csv"
 CHUNK_SIZE  = 100_000
 
@@ -39,17 +41,28 @@ QUALITY_COLS = [
 
 # ── Step 1: Load and filter lines data ────────────────────────────────────────
 
-print("── Loading lines data ───────────────────────────────────────")
+files = line_level_files()
+print(f"── Loading lines data from {len(files)} file(s) in {LINE_LEVEL_DIR}/ ──")
+for f in files:
+    print(f"  {f}")
+
+usecols = ["lineId", "gameId", "name", "season", "playerTeam", "situation", "icetime"] + \
+          [c for c in QUALITY_COLS if c != "icetime"]
+
 chunks = []
-for i, chunk in enumerate(pd.read_csv(
-        LINES_FILE, low_memory=False, chunksize=CHUNK_SIZE,
-        usecols=["lineId", "name", "season", "playerTeam", "situation", "icetime"] + 
-                [c for c in QUALITY_COLS if c != "icetime"])):
+for i, chunk in enumerate(iter_csv_chunks(files, LINE_LEVEL_DIR, usecols=usecols, chunksize=CHUNK_SIZE)):
     chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
     chunks.append(chunk[chunk["situation"] == SITUATION])
     print(f"  Chunk {i+1} processed", end="\r")
 
 lines = pd.concat(chunks, ignore_index=True)
+# Multiple raw exports can overlap in coverage — dedupe on the natural key
+# before aggregating, in case a season appears in more than one input file.
+before_dedup = len(lines)
+dedup_key = ["lineId", "gameId", "situation"] if "gameId" in lines.columns else ["lineId", "season", "playerTeam", "situation"]
+lines = lines.drop_duplicates(subset=dedup_key)
+if len(lines) < before_dedup:
+    print(f"\n  Dropped {before_dedup - len(lines):,} duplicate rows across input files")
 lines.fillna(0, inplace=True)
 print(f"\n  {len(lines):,} 5on5 line-game rows")
 

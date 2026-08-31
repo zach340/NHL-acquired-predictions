@@ -8,14 +8,16 @@ from raw counting stats, and keeps per-60 rate features for the model.
 Usage:
     python build_season_dataset.py
 
-Input:  2008_to_2024_cleaned.csv         (MoneyPuck game-level, all situations)
+Input:  every CSV in raw_data/game_level/  (MoneyPuck game-level exports, all situations —
+                                             drop a new season's file in there to include it)
 Output: season_dataset.csv               (clean season-level training data)
 """
 
 import pandas as pd
 import numpy as np
 
-INPUT_FILE  = "2008_to_2024_cleaned.csv"
+from data_sources import GAME_LEVEL_DIR, game_level_files, iter_csv_chunks
+
 OUTPUT_FILE = "season_dataset.csv"
 CHUNK_SIZE  = 100_000
 
@@ -58,21 +60,28 @@ COUNT_COLS = [
 
 # ── Load and filter to all-situation ──────────────────────────────────────────
 
-print("── Loading game-level data ──────────────────────────────────")
+files = game_level_files()
+print(f"── Loading game-level data from {len(files)} file(s) in {GAME_LEVEL_DIR}/ ──")
+for f in files:
+    print(f"  {f}")
 
-header_cols = pd.read_csv(INPUT_FILE, nrows=0).columns
-usecols = [c for c in GROUP + ["situation", "game_id"] + COUNT_COLS if c in header_cols]
+usecols = GROUP + ["situation", "game_id"] + COUNT_COLS
 
 chunks = []
-for i, chunk in enumerate(pd.read_csv(
-    INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE, usecols=usecols
-)):
+for i, chunk in enumerate(iter_csv_chunks(files, GAME_LEVEL_DIR, usecols=usecols, chunksize=CHUNK_SIZE)):
     chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
     chunks.append(chunk[chunk["situation"] == "all"])
     print(f"  Chunk {i+1} processed", end="\r")
 
 df = pd.concat(chunks, ignore_index=True)
 df = df.fillna(0)
+# Multiple raw exports can overlap in coverage (e.g. a season downloaded both as
+# part of the historical file and again as its own current-season file) — dedupe
+# on the natural per-player-per-game key before aggregating.
+before_dedup = len(df)
+df = df.drop_duplicates(subset=["player_id", "game_id", "situation"])
+if len(df) < before_dedup:
+    print(f"\n  Dropped {before_dedup - len(df):,} duplicate rows across input files")
 print(f"\n  {len(df):,} all-situation game-level rows")
 
 # ── Aggregate to season level ──────────────────────────────────────────────────

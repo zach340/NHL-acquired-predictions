@@ -1,0 +1,40 @@
+name: Daily player ages refresh
+
+on:
+  schedule:
+    # 11:00 UTC = 6:00 AM Central Daylight Time (UTC-5).
+    # During Central Standard Time (UTC-6, roughly Nov-Mar) this runs at 5:00 AM local instead,
+    # since GitHub Actions cron does not follow daylight saving. Adjust the hour below if needed.
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests pandas
+
+      - name: Refresh player ages from NHL API
+        run: python fetch_player_ages.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add player_ages.csv
+          if git diff --cached --quiet; then
+            echo "No changes to player_ages.csv"
+          else
+            git commit -m "Daily refresh: player_ages.csv"
+            git push
+          fi

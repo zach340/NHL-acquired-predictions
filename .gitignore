@@ -1,4 +1,8 @@
-# Raw source data — too large for GitHub
+# Raw source data — too large for GitHub. Drop MoneyPuck exports here;
+# see data_sources.py for the game_level / line_level convention.
+raw_data/
+
+# Legacy raw-data filenames from before the raw_data/ convention
 2008_to_2024.csv
 2008_to_2024_cleaned.csv
 2008_to_2024_cleaned2.csv
@@ -6,6 +10,10 @@
 offensive_performance_by_game.csv
 offensive_performance_by_season_per60.csv
 offensive_performance_by_season_per60_rena*.csv
+
+# Refresh/retrain run logs
+daily_refresh.log
+refresh_and_retrain.log
 
 # Python cache
 __pycache__/

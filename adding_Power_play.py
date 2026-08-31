@@ -7,21 +7,23 @@ and aggregates to season level for joining onto the main training dataset.
 Usage:
     python extract_pp_features.py
 
-Input:  2008_to_2024_cleaned.csv  (raw MoneyPuck game-level data)
+Input:  every CSV in raw_data/game_level/  (raw MoneyPuck game-level exports —
+                                            drop a new season's file in there to include it)
 Output: pp_features.csv           (season-level PP + zone start features)
 """
 
 import pandas as pd
 import numpy as np
 
-INPUT_CSV  = "2008_to_2024_cleaned.csv"
+from data_sources import GAME_LEVEL_DIR, game_level_files, iter_csv_chunks
+
 OUTPUT_CSV = "pp_features.csv"
 CHUNK_SIZE = 100_000
 
 # ── Columns we need ────────────────────────────────────────────────────────────
 
 KEEP_COLS = [
-    "player_id", "player_name", "season", "position", "situation",
+    "player_id", "player_name", "season", "position", "situation", "game_id",
     "ice_time",
     "ind_goals",
     "ind_primary_assists",
@@ -38,11 +40,15 @@ KEEP_COLS = [
 
 SITUATIONS = ["5on4", "all"]
 
-print("── Reading and filtering data ───────────────────────────────")
+files = game_level_files()
+print(f"── Reading and filtering data from {len(files)} file(s) in {GAME_LEVEL_DIR}/ ──")
+for f in files:
+    print(f"  {f}")
+
 chunks_all = []
 chunks_pp  = []
 
-for i, chunk in enumerate(pd.read_csv(INPUT_CSV, low_memory=False, chunksize=CHUNK_SIZE, usecols=KEEP_COLS)):
+for i, chunk in enumerate(iter_csv_chunks(files, GAME_LEVEL_DIR, usecols=KEEP_COLS, chunksize=CHUNK_SIZE)):
     chunk.fillna(0, inplace=True)
     chunk["situation"] = chunk["situation"].astype(str).str.strip().str.lower()
 
@@ -52,8 +58,10 @@ for i, chunk in enumerate(pd.read_csv(INPUT_CSV, low_memory=False, chunksize=CHU
     print(f"  Chunk {i+1} processed", end="\r")
 
 print("\n── Concatenating ────────────────────────────────────────────")
-df_all = pd.concat(chunks_all, ignore_index=True)
-df_pp  = pd.concat(chunks_pp,  ignore_index=True)
+# Multiple raw exports can overlap in coverage — dedupe on the natural key
+# before aggregating, in case a season appears in more than one input file.
+df_all = pd.concat(chunks_all, ignore_index=True).drop_duplicates(subset=["player_id", "game_id", "situation"])
+df_pp  = pd.concat(chunks_pp,  ignore_index=True).drop_duplicates(subset=["player_id", "game_id", "situation"])
 print(f"  All situation rows:  {len(df_all):,}")
 print(f"  5on4 situation rows: {len(df_pp):,}")
 

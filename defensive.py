@@ -13,14 +13,16 @@ Pulls from three situations:
 Usage:
     python build_defensive_dataset.py
 
-Input:  2008_to_2024_cleaned.csv   (full MoneyPuck game-level file)
+Input:  every CSV in raw_data/game_level/  (MoneyPuck game-level exports —
+                                            drop a new season's file in there to include it)
 Output: defensive_dataset.csv      (season-level defensive stats per player)
 """
 
 import pandas as pd
 import numpy as np
 
-INPUT_FILE  = "2008_to_2024_cleaned.csv"
+from data_sources import GAME_LEVEL_DIR, game_level_files, iter_csv_chunks
+
 OUTPUT_FILE = "defensive_dataset.csv"
 CHUNK_SIZE  = 150_000
 
@@ -67,14 +69,16 @@ FIVEONFIVE_COLS = [
 SITUATIONS = ["all", "4on5", "5on5"]
 
 def load_all_situations():
-    needed = GROUP + ["situation", "game_id"] + ALL_COLS + PK_COLS + FIVEONFIVE_COLS
-    header_cols = pd.read_csv(INPUT_FILE, nrows=0).columns
-    needed = [c for c in dict.fromkeys(needed) if c in header_cols]
+    needed = list(dict.fromkeys(GROUP + ["situation", "game_id"] + ALL_COLS + PK_COLS + FIVEONFIVE_COLS))
+    files = game_level_files()
+    print(f"  Reading {len(files)} file(s) from {GAME_LEVEL_DIR}/:")
+    for f in files:
+        print(f"    {f}")
 
     buckets = {situation: [] for situation in SITUATIONS}
     n_chunks = 0
 
-    for chunk in pd.read_csv(INPUT_FILE, low_memory=False, chunksize=CHUNK_SIZE, usecols=needed):
+    for chunk in iter_csv_chunks(files, GAME_LEVEL_DIR, usecols=needed, chunksize=CHUNK_SIZE):
         # Filter to defensemen first — discard all forward/goalie rows immediately
         chunk = chunk[chunk["position"] == "D"]
         if chunk.empty:
@@ -88,10 +92,17 @@ def load_all_situations():
         n_chunks += 1
         print(f"  chunk {n_chunks} processed", end="\r")
 
-    result = {
-        situation: (pd.concat(rows, ignore_index=True) if rows else pd.DataFrame())
-        for situation, rows in buckets.items()
-    }
+    result = {}
+    for situation, rows in buckets.items():
+        df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+        if not df.empty:
+            # Multiple raw exports can overlap in coverage — dedupe on the
+            # natural key before aggregating.
+            before = len(df)
+            df = df.drop_duplicates(subset=["player_id", "game_id", "situation"])
+            if len(df) < before:
+                print(f"  [{situation}] dropped {before - len(df):,} duplicate rows across input files")
+        result[situation] = df
     print()
     for situation, df in result.items():
         print(f"  [{situation}] {len(df):,} rows loaded")
