@@ -5,6 +5,8 @@ Feature-engineering helpers shared by the forward and defenseman models.
 Everything that looks at a player's history uses prior seasons only.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -101,7 +103,10 @@ def add_career_curve_features(df, curve_stats, peak_stats, pct_peak_stats, age_s
                 if len(pa) < 3:
                     continue
                 try:
-                    a, b, _ = np.polyfit(pa, pv, 2)
+                    with warnings.catch_warnings():
+                        # Few, closely spaced ages make the fit ill-conditioned; that's expected
+                        warnings.simplefilter("ignore", np.exceptions.RankWarning)
+                        a, b, _ = np.polyfit(pa, pv, 2)
                 except (np.linalg.LinAlgError, ValueError):
                     continue
                 curr_age = ages_arr[i]
