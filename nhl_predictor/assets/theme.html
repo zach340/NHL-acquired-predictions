@@ -1,0 +1,132 @@
+
+    <style>
+    /* ── Live CSS custom properties (updated every rerun) ──────────── */
+    :root {
+        --team-bg-base:     __BASE_GRAD__;
+        --team-bg-override: __OVERRIDE_GRAD__;
+    }
+
+    /* ── Base dark theme ────────────────────────────────────────────── */
+    .stApp {
+        background-color: #141414 !important;
+        background-image: var(--team-bg-base) !important;
+        color: #f0f0f0 !important;
+    }
+
+    /* Main content area */
+    .main .block-container,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewBlockContainer"] {
+        background: transparent !important;
+        color: #f0f0f0 !important;
+    }
+
+    /* Headings and specific Streamlit text containers */
+    h1, h2, h3, h4, h5, h6 {
+        color: #ffffff !important;
+    }
+    label, .stCaption,
+    [data-testid="stMarkdownContainer"] > p,
+    [data-testid="stMarkdownContainer"] > div {
+        color: #f0f0f0 !important;
+    }
+    .stText, small {
+        color: #cccccc !important;
+    }
+
+    /* Metrics */
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricDelta"] {
+        color: #f0f0f0 !important;
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab"] {
+        background: transparent !important;
+        color: #cccccc !important;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #ffffff !important;
+    }
+
+    /* Input widgets */
+    .stSelectbox > div > div,
+    .stTextInput > div > div,
+    [data-baseweb="select"],
+    [data-baseweb="input"] {
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+        border-color: #4a5568 !important;
+    }
+    [data-baseweb="select"] * {
+        color: #f0f0f0 !important;
+        background-color: #1e2a45 !important;
+    }
+
+    /* Dropdown popup */
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"],
+    [data-baseweb="list"],
+    ul[role="listbox"] {
+        background-color: #1e2a45 !important;
+        border: 1px solid #4a5568 !important;
+        color: #f0f0f0 !important;
+    }
+    [role="option"],
+    [data-baseweb="menu-item"],
+    li[role="option"] {
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+    }
+    [role="option"]:hover,
+    [role="option"][aria-selected="true"],
+    li[role="option"]:hover {
+        background-color: #2d4a7a !important;
+        color: #ffffff !important;
+    }
+
+    /* Slider */
+    [data-testid="stSlider"] label {
+        color: #f0f0f0 !important;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+        border: 1px solid #4a5568 !important;
+    }
+
+    /* Expander */
+    [data-testid="stExpander"] {
+        background-color: #1a2236 !important;
+        border: 1px solid #4a5568 !important;
+    }
+    [data-testid="stExpander"] summary {
+        color: #f0f0f0 !important;
+    }
+
+    /* Info / warning / success / error boxes */
+    [data-testid="stAlert"] {
+        background-color: #1e2a45 !important;
+        color: #f0f0f0 !important;
+    }
+
+    /* Dataframe */
+    [data-testid="stDataFrame"] {
+        background-color: #1a2236 !important;
+    }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: #0e1420 !important;
+    }
+
+    /* Top toolbar / header */
+    header[data-testid="stHeader"] {
+        background-color: #141414 !important;
+    }
+    </style>
+    

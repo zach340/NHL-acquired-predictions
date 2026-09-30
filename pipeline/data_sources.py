@@ -18,8 +18,12 @@ game_id + situation) after concatenating chunks from every file.
 
 import glob
 import os
+import sys
 
 import pandas as pd
+
+# Progress output uses box-drawing characters; don't crash on cp1252 consoles
+sys.stdout.reconfigure(encoding="utf-8")
 
 GAME_LEVEL_DIR = "raw_data/game_level"
 LINE_LEVEL_DIR = "raw_data/line_level"
@@ -37,7 +41,7 @@ def _require_files(file_paths, source_dir):
     if not file_paths:
         raise FileNotFoundError(
             f"No CSV files found in {source_dir}/ — download the MoneyPuck export(s) "
-            f"and place them there before running this script."
+            "and place them there before running this script."
         )
 
 

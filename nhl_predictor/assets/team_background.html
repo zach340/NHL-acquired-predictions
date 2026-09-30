@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head><style>html,body{margin:0;padding:0;background:transparent;}</style></head>
+<body>
+<script>
+(function(){
+  var D = window.parent.document;
+
+  /* All team gradients baked in — no round-trip to Python required. */
+  var GRADS = __GRADS_JSON__;
+
+  var OVERRIDE_TABS = ['Roster Insertion', 'Pairing', 'Contract Evaluator'];
+
+  function isRosterActive() {
+    return Array.from(D.querySelectorAll('button[role="tab"]')).some(function(t) {
+      return OVERRIDE_TABS.indexOf(t.textContent.trim()) !== -1 &&
+             t.getAttribute('aria-selected') === 'true';
+    });
+  }
+
+  function applyGrad(grad) {
+    var app = D.querySelector('.stApp');
+    if (app) app.style.setProperty('background-image', grad, 'important');
+  }
+
+  function clearGrad() {
+    var app = D.querySelector('.stApp');
+    if (app) app.style.removeProperty('background-image');
+  }
+
+  /* Read whatever team code is currently shown in a visible selectbox.
+     Scans each word of the element's visible text so it works regardless
+     of whether BaseWeb renders the value in a span, div, or any other tag.
+     Team codes are 2-3 uppercase letters (e.g. "PIT") — player name words
+     are mixed-case so they never collide. */
+  function activeSelectboxTeam() {
+    var selects = D.querySelectorAll('[data-baseweb="select"]');
+    for (var i = 0; i < selects.length; i++) {
+      var rect = selects[i].getBoundingClientRect();
+      if (rect.width === 0) continue;   // hidden / not in active tab
+      var words = (selects[i].innerText || selects[i].textContent || '')
+                    .trim().split(/\s+/);
+      for (var j = 0; j < words.length; j++) {
+        var w = words[j].replace(/[^A-Z]/g, '');  // strip parens etc.
+        if (GRADS[w]) return w;
+      }
+    }
+    return null;
+  }
+
+  /* Full update: tab state + current selectbox value. */
+  function update() {
+    if (isRosterActive()) {
+      var code = activeSelectboxTeam();
+      if (code) {
+        applyGrad(GRADS[code]);
+      } else {
+        /* Fall back to the CSS-var override set by Python. */
+        var cs = getComputedStyle(D.documentElement);
+        var grad = cs.getPropertyValue('--team-bg-override').trim();
+        if (grad && grad !== 'none') applyGrad(grad);
+      }
+    } else {
+      clearGrad();
+    }
+  }
+
+  /* --- one-time observer setup --- */
+  if (D.__teamBgReady) {
+    /* Rerun: refresh the update fn reference so the parent poll stays current. */
+    window.parent.__teamBgUpdate = update;
+    update();
+    return;
+  }
+  D.__teamBgReady = true;
+
+  /* Expose on parent so the interval below can call the latest closure
+     even after this iframe is replaced on a subsequent rerun. */
+  window.parent.__teamBgUpdate = update;
+
+  /* Instant tab-click response. */
+  new MutationObserver(function(muts) {
+    for (var i = 0; i < muts.length; i++) {
+      if (muts[i].attributeName === 'aria-selected') { update(); return; }
+    }
+  }).observe(D.body, {
+    attributes: true, subtree: true, attributeFilter: ['aria-selected']
+  });
+
+  /* Poll runs in the PARENT window — survives iframe replacement on reruns.
+     Each new iframe updates window.parent.__teamBgUpdate so this always
+     calls the freshest closure with the latest GRADS / D references. */
+  window.parent.setInterval(function() {
+    window.parent.__teamBgUpdate && window.parent.__teamBgUpdate();
+  }, 50);
+
+  update();
+})();
+</script>
+</body>
+</html>

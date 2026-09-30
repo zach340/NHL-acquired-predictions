@@ -1,0 +1,42 @@
+
+    <style>
+        /* Force the app to scroll internally so position:fixed works in HF Spaces */
+        html, body {
+            height: 100vh !important;
+            overflow: hidden !important;
+        }
+        .main {
+            height: 100vh !important;
+            overflow-y: auto !important;
+        }
+        .block-container {
+            max-width: 860px;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            padding-top: 3rem;
+        }
+        /* Pin hamburger button — now truly fixed since page scrolls internally */
+        [data-testid="collapsedControl"] {
+            position: fixed !important;
+            top: 10px !important;
+            left: 10px !important;
+            z-index: 999999 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            background: rgba(30,30,30,0.85) !important;
+            border-radius: 8px !important;
+            padding: 6px 10px !important;
+        }
+        [data-testid="collapsedControl"] svg {
+            display: block !important;
+            color: white !important;
+            fill: white !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="baseButton-headerNoPadding"] svg { display:none !important; }
+    </style>
+
+
+    <style>
+        [data-testid="collapsedControl"] svg { display:none !important; }
+    </style>

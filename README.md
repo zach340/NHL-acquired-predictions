@@ -28,22 +28,36 @@ Users can select a player and a destination team and receive a predicted statist
 ## Project Structure
 
 ```
-app.py                        # Streamlit application entry point
-model_utils.py                # Model loading and prediction logic
-process_hockey_data.py        # Core data processing pipeline
-cleaning_and_shrinking.py     # Data validation and cleaning
-combining_by_season.py        # Season-level aggregation
-addingx60.py                  # Per-60 rate feature construction
-adding_Power_play.py          # Power play context features
-lines.py                      # Linemate quality features
-shooting_danger.py            # Shooting danger zone features
-defensive.py                  # Defensive metric processing
-fetch_player_ages.py          # Player age data pipeline
-trained_models_forwards_v5.joblib   # Serialized forward models
-defensive_models.joblib             # Serialized defensive models
-dockerfile                    # Container configuration
-requirements.txt              # Python dependencies
+app.py                          # Streamlit entry point (page setup + tab dispatch)
+refresh_and_retrain.py          # Rebuild all data files, then clear the model caches
+nhl_predictor/
+  config.py                     # Paths, teams, model settings, feature lists
+  data_io.py                    # CSV loading, ages
+  features.py                   # Shared feature-engineering helpers
+  training.py                   # Residual-model CV training loop, ModelBundle cache
+  offense.py                    # Forward model: features, training, team-fit predictions
+  defense.py                    # Defenseman model: features, training, predictions
+  grading.py                    # Percentile grades, D-man archetypes
+  pairing.py                    # Defensive pairing / cascade insertion
+  contract.py                   # Age curves, contract projections, CBA limits
+  nhl_api.py                    # All NHL API calls + name/headshot and shift caches
+  charts.py                     # Plotly / matplotlib figures
+  theme.py                      # Dark theme + team-coloured background
+  assets/                       # Injected CSS / JS (tour, tab persistence, background)
+  ui/                           # One module per tab + shared components
+pipeline/
+  fetch_player_ages.py          # Player ages from the NHL API (runs daily via GitHub Actions)
+  season_dataset.py             # MoneyPuck game-level → season_dataset.csv
+  power_play.py                 # → pp_features.csv
+  defensive_dataset.py          # → defensive_dataset.csv
+  linemates.py                  # MoneyPuck lines → linemate_features.csv
+  data_sources.py               # Reads every export in raw_data/
+  legacy/                       # One-off scripts from the original raw-data workflow
+tests/                          # Unit tests for pure logic (python -m pytest tests)
 ```
+
+Trained models are cached as `trained_models_forwards_v5.joblib` and
+`defensive_models.joblib`; if they are missing the app trains on first launch.
 
 ---
 
@@ -59,21 +73,42 @@ requirements.txt              # Python dependencies
 
 ## Running Locally
 
+Requires Python 3.12 (3.11+ works). Run every command from the repo root.
+
 **With Python:**
 ```bash
 git clone https://github.com/zach340/NHL-acquired-predictions.git
 cd NHL-acquired-predictions
+git lfs pull                       # the CSV data files are stored in Git LFS
 pip install -r requirements.txt
-streamlit run app.py
+python -m streamlit run app.py     # opens http://localhost:8501
 ```
+
+The first launch trains both models (~5–10 min) and caches them as
+`trained_models_forwards_v5.joblib` / `defensive_models.joblib`; later
+launches load them in seconds. Delete those files (or use the retrain buttons
+on the **Models** tab) to retrain.
 
 **With Docker:**
 ```bash
 docker build -t nhl-predictor .
-docker run -p 8501:8501 nhl-predictor
+docker run -p 7860:7860 nhl-predictor   # opens http://localhost:7860
 ```
 
-Then open `http://localhost:8501` in your browser.
+**Tests:**
+```bash
+pip install pytest
+python -m pytest tests
+```
+
+**Refreshing the data** (needs the raw MoneyPuck exports in `raw_data/game_level/`
+and `raw_data/line_level/` — see `pipeline/data_sources.py`):
+```bash
+python refresh_and_retrain.py      # rebuild every CSV, then clear the model caches
+python pipeline/fetch_player_ages.py   # ages only (also runs daily via GitHub Actions)
+```
+
+Seasons are labelled by their start year throughout (2024 = the 2024-25 season).
 
 ---
 
