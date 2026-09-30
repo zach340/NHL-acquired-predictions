@@ -19,3 +19,5 @@ refresh_and_retrain.log
 __pycache__/
 *.pyc
 .env
+# Trained model caches (regenerated on first launch) and partial writes
+*.joblib.tmp
