@@ -1,6 +1,6 @@
 """
-build_defensive_dataset.py
-==========================
+defensive_dataset.py
+====================
 Aggregates defensive stats from the full MoneyPuck game-level file
 to season level per player.
 
@@ -11,7 +11,7 @@ Pulls from three situations:
   - "5on5" → on-ice defensive impact (xG against, corsi%, shot suppression)
 
 Usage:
-    python build_defensive_dataset.py
+    python pipeline/defensive_dataset.py
 
 Input:  every CSV in raw_data/game_level/  (MoneyPuck game-level exports —
                                             drop a new season's file in there to include it)
@@ -150,10 +150,18 @@ else:
 
 df_5v5 = situation_dfs["5on5"]
 
+# On-ice percentages are per-game shares (0-1): average them weighted by
+# 5v5 ice time rather than summing them across games.
+PCT_COLS = ["on_ice_expected_goals_pct", "on_ice_corsi_pct", "on_ice_fenwick_pct"]
+
 if not df_5v5.empty:
     df_5v5 = df_5v5[df_5v5["position"] == "D"].copy()
     fv5_agg_cols = [c for c in FIVEONFIVE_COLS if c in df_5v5.columns]
+    pct_cols = [c for c in PCT_COLS if c in df_5v5.columns]
+    df_5v5[pct_cols] = df_5v5[pct_cols].mul(df_5v5["ice_time"], axis=0)
     fv5_agg = df_5v5.groupby(GROUP)[fv5_agg_cols].sum().reset_index()
+    for c in pct_cols:
+        fv5_agg[c] = np.where(fv5_agg["ice_time"] > 0, fv5_agg[c] / fv5_agg["ice_time"], np.nan)
     # Rename to avoid collision with all-situation ice_time
     fv5_agg = fv5_agg.rename(columns={"ice_time": "fv5_ice_time"})
 else:
@@ -217,12 +225,6 @@ season["take_give_ratio"] = np.where(
     np.nan
 )
 
-# On-ice 5v5 defensive metrics (weighted average by 5v5 ice time)
-for col in ["on_ice_expected_goals_pct", "on_ice_corsi_pct", "on_ice_fenwick_pct"]:
-    if col in season.columns:
-        # Already summed — convert back to weighted average using 5v5 ice time
-        season[f"{col}_avg"] = season[col] / np.maximum(1, (season["fv5_ice_time"] / season["fv5_ice_time"].max() * 100))
-
 # xG against per 60 (5v5)
 if "on_ice_against_expected_goals" in season.columns:
     season["xg_against_per60_5v5"] = season["on_ice_against_expected_goals"] / fv5_safe
@@ -243,16 +245,16 @@ season["player_team"] = season["player_team"].replace({"ATL": "WPG", "ARI": "UTA
 MIN_GP = 20
 season = season[season["games_played"] >= MIN_GP].copy()
 
-print(f"\n── Output ───────────────────────────────────────────────────")
+print("\n── Output ───────────────────────────────────────────────────")
 print(f"  {len(season):,} player-seasons (≥{MIN_GP} GP)")
 print(f"  Seasons: {sorted(season['season'].unique())}")
 
-print(f"\n  Top 10 hitters (2024):")
+print("\n  Top 10 hitters (2024):")
 if "ind_hits_pg" in season.columns:
     top = season[season["season"] == 2024].sort_values("ind_hits_pg", ascending=False).head(10)
     print(top[["player_name", "player_team", "games_played", "ind_hits_pg", "pk_ice_pct"]].to_string(index=False))
 
-print(f"\n  Top 10 by takeaways/game (2024):")
+print("\n  Top 10 by takeaways/game (2024):")
 if "ind_takeaways_pg" in season.columns:
     top = season[season["season"] == 2024].sort_values("ind_takeaways_pg", ascending=False).head(10)
     print(top[["player_name", "player_team", "games_played", "ind_takeaways_pg", "take_give_ratio"]].to_string(index=False))

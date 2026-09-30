@@ -1,11 +1,11 @@
 """
-extract_linemate_features.py
-============================
+linemates.py
+============
 Extracts linemate quality features from MoneyPuck lines data and aggregates
 to season level for joining onto the main training dataset.
 
 Usage:
-    python extract_linemate_features.py
+    python pipeline/linemates.py
 
 Input:  every CSV in raw_data/line_level/  (raw MoneyPuck lines data —
                                             drop a new season's file in there to include it)
@@ -72,7 +72,14 @@ print("\n── Aggregating to season level ────────────
 agg_dict = {col: "sum" for col in QUALITY_COLS if col != "icetime"}
 agg_dict["icetime"] = "sum"
 
+# xGoalsPercentage / corsiPercentage are per-game shares: weight them by ice
+# time so the season value is an average, not a sum across games.
+PCT_COLS = ["xGoalsPercentage", "corsiPercentage"]
+lines[PCT_COLS] = lines[PCT_COLS].mul(lines["icetime"], axis=0)
+
 line_season = lines.groupby(["lineId", "name", "season", "playerTeam"], as_index=False).agg(agg_dict)
+for col in PCT_COLS:
+    line_season[col] = np.where(line_season["icetime"] > 0, line_season[col] / line_season["icetime"], 0)
 
 # Per-60 rates for line quality
 ice_hours = line_season["icetime"] / 3600
@@ -166,9 +173,9 @@ OUTPUT_COLS = ["player_id", "season"] + LINE_QUALITY_COLS + ["n_distinct_lines",
 result = merged[OUTPUT_COLS].drop_duplicates(subset=["player_id", "season"])
 result = result.fillna(0)
 
-print(f"\n── Output ───────────────────────────────────────────────────")
+print("\n── Output ───────────────────────────────────────────────────")
 print(f"  {len(result):,} player-season rows saved")
-print(f"\n  Sample top line quality players:")
+print("\n  Sample top line quality players:")
 print(result.sort_values("line_adj_xg_per60", ascending=False).head(10)[
     ["player_id", "season", "line_adj_xg_per60", "line_xg_pct", "n_distinct_lines"]
 ].to_string(index=False))

@@ -1,0 +1,65 @@
+
+<!DOCTYPE html>
+<html><head><style>body{margin:0;background:transparent;}</style></head>
+<body>
+<script>
+(function(){
+  var P = window.parent, D = P.document;
+  var KEY = 'nhp_outer_tab';
+  var OUTER = ['Offensive','Defensive','Contract Evaluator','Models','Validation'];
+
+  function outerTabBtns() {
+    return Array.from(D.querySelectorAll('button[role="tab"]')).filter(function(b){
+      return OUTER.indexOf(b.textContent.trim()) >= 0;
+    });
+  }
+
+  var restoring = false;
+  function restore() {
+    if (restoring) return;
+    var saved = sessionStorage.getItem(KEY);
+    if (!saved) return;
+    var target = outerTabBtns().find(function(b){ return b.textContent.trim() === saved; });
+    if (target && target.getAttribute('aria-selected') !== 'true') {
+      restoring = true;
+      target.click();
+      setTimeout(function(){ restoring = false; }, 600);
+    }
+  }
+
+  // Save the clicked tab IMMEDIATELY (synchronously) so that when the
+  // MutationObserver fires restore() in the same event loop tick, it
+  // already sees the correct saved value and does nothing.
+  // Using setTimeout here was the bug: restore() fired via rAF before
+  // the delayed save ran, read the stale previous-tab value, and clicked
+  // back to Offensive — visible as the page jumping before names appeared.
+  var tagged = new WeakSet();
+  function attachSave() {
+    outerTabBtns().forEach(function(b){
+      if (!tagged.has(b)) {
+        tagged.add(b);
+        b.addEventListener('click', function(){
+          sessionStorage.setItem(KEY, b.textContent.trim());
+        });
+      }
+    });
+  }
+
+  // After each Streamlit rerun, restore the correct tab before the next paint
+  var pending = false;
+  var obs = new MutationObserver(function(){
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function(){
+      pending = false;
+      attachSave();
+      restore();
+    });
+  });
+  obs.observe(D.body, { childList: true, subtree: true });
+
+  // Initial run
+  setTimeout(function(){ attachSave(); restore(); }, 600);
+})();
+</script>
+</body></html>

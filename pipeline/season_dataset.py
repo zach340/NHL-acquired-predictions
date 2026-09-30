@@ -1,12 +1,12 @@
 """
-build_season_dataset.py
-=======================
+season_dataset.py
+=================
 Builds a clean season-level dataset from MoneyPuck game-level data.
 Uses unique game_id count for true games_played, derives per-game targets
 from raw counting stats, and keeps per-60 rate features for the model.
 
 Usage:
-    python build_season_dataset.py
+    python pipeline/season_dataset.py
 
 Input:  every CSV in raw_data/game_level/  (MoneyPuck game-level exports, all situations —
                                              drop a new season's file in there to include it)
@@ -172,18 +172,18 @@ season["player_team"] = season["player_team"].replace({"ATL": "WPG", "ARI": "UTA
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
 
-print(f"\n── Sanity checks ────────────────────────────────────────────")
+print("\n── Sanity checks ────────────────────────────────────────────")
 print(f"  Seasons: {sorted(season['season'].unique())}")
 print(f"  Teams: {sorted(season['player_team'].unique())}")
 print(f"  Positions: {sorted(season['position'].unique())}")
 print(f"  games_played: min={season['games_played'].min()} max={season['games_played'].max()} mean={season['games_played'].mean():.1f}")
 
-print(f"\n  Per-game target stats (forwards only):")
+print("\n  Per-game target stats (forwards only):")
 fwd = season[season["position"].isin(["C","L","R"])]
 for col in ["game_score_per_game", "goals_per_game", "points_per_game", "weighted_shots_pg"]:
     print(f"    {col:<28} mean={fwd[col].mean():.3f}  max={fwd[col].max():.3f}")
 
-print(f"\n  Top 10 forwards by weighted_shots_pg (2024):")
+print("\n  Top 10 forwards by weighted_shots_pg (2024):")
 top = (
     fwd[fwd["season"] == 2024]
     .sort_values("weighted_shots_pg", ascending=False)

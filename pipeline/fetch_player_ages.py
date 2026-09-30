@@ -5,25 +5,30 @@ Fetches player birth dates from the NHL API for all seasons in your dataset
 and outputs a CSV with player_id, birth_date, and age at the start of each season.
 
 Usage:
-    python fetch_player_ages.py
+    python pipeline/fetch_player_ages.py
 
 Output:
     player_ages.csv  — join this onto your main dataset by player_id + season
 """
 
-import requests
-import pandas as pd
+import sys
 import time
-from datetime import datetime
+
+import pandas as pd
+import requests
+from datetime import date, datetime
+
+# Progress output uses box-drawing characters; don't crash on cp1252 consoles
+sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
+# Seasons are labelled by START year to match MoneyPuck (2024 = 2024-25).
 
-SEASONS = [
-    "20072008", "20082009", "20092010", "20102011", "20112012",
-    "20122013", "20132014", "20142015", "20152016", "20162017",
-    "20172018", "20182019", "20192020", "20202021", "20212022",
-    "20222023", "20232024", "20242025", "20252026",
-]
+FIRST_SEASON_START = 2008
+# New-season rosters appear after the draft / free agency, so roll over in July
+CURRENT_SEASON_START = date.today().year if date.today().month >= 7 else date.today().year - 1
+
+SEASONS = [f"{y}{y + 1}" for y in range(FIRST_SEASON_START, CURRENT_SEASON_START + 1)]
 
 # NHL season starts in October — use Oct 1 as age reference date
 SEASON_START_MONTH = 10
@@ -35,7 +40,7 @@ OUTPUT_FILE = "player_ages.csv"
 
 def fetch_skater_bios(season: str) -> pd.DataFrame:
     url = (
-        f"https://api.nhle.com/stats/rest/en/skater/bios"
+        "https://api.nhle.com/stats/rest/en/skater/bios"
         f"?limit=-1&start=0&cayenneExp=seasonId={season}"
     )
     try:
@@ -54,15 +59,15 @@ def fetch_skater_bios(season: str) -> pd.DataFrame:
 
 
 def season_str_to_year(season_str: str) -> int:
-    """Convert '20232024' -> 2024 (the season label used in your dataset)."""
-    return int(season_str[4:])
+    """Convert '20232024' -> 2023 (start year, the season label used by MoneyPuck)."""
+    return int(season_str[:4])
 
 
 def calc_age(birth_date_str: str, season_year: int) -> float:
-    """Age in years as of Oct 1 of the season start year (season_year - 1)."""
+    """Age in years as of Oct 1 of the season's start year."""
     try:
         birth = datetime.strptime(birth_date_str, "%Y-%m-%d")
-        ref   = datetime(season_year - 1, SEASON_START_MONTH, SEASON_START_DAY)
+        ref   = datetime(season_year, SEASON_START_MONTH, SEASON_START_DAY)
         return round((ref - birth).days / 365.25, 1)
     except Exception:
         return None
@@ -117,7 +122,7 @@ def main():
         print(f"  Filled {missing_mask.sum()} missing ages from birthDate.")
 
     result.to_csv(OUTPUT_FILE, index=False)
-    print(f"\n── Done ─────────────────────────────────────────────────")
+    print("\n── Done ─────────────────────────────────────────────────")
     print(f"  {len(result):,} player-season rows saved to {OUTPUT_FILE}")
     print(f"  {result['player_id'].nunique():,} unique players")
     print(f"  Age range: {result['age'].min()} to {result['age'].max()}")

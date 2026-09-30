@@ -1,11 +1,11 @@
 """
-extract_pp_features.py
-======================
+power_play.py
+=============
 Extracts powerplay and zone start features from MoneyPuck game-level data
 and aggregates to season level for joining onto the main training dataset.
 
 Usage:
-    python extract_pp_features.py
+    python pipeline/power_play.py
 
 Input:  every CSV in raw_data/game_level/  (raw MoneyPuck game-level exports —
                                             drop a new season's file in there to include it)
@@ -140,11 +140,11 @@ OUTPUT_COLS = GROUP + [
 
 result = merged[OUTPUT_COLS]
 
-print(f"\n── Output ───────────────────────────────────────────────────")
+print("\n── Output ───────────────────────────────────────────────────")
 print(f"  {len(result):,} player-seasons")
 print(f"  {result['player_id'].nunique():,} unique players")
 print(f"  Seasons: {sorted(result['season'].unique())}")
-print(f"\n  Sample PP features:")
+print("\n  Sample PP features:")
 print(result[result["pp_icetime_pct"] > 0.05].sort_values("pp_points_per60", ascending=False).head(5)[
     ["player_name", "season", "pp_points_per60", "pp_icetime_pct", "o_zone_start_pct"]
 ].to_string(index=False))

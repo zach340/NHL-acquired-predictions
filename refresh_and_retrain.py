@@ -7,10 +7,10 @@ One-command "get the model as current as possible" pipeline:
   2. Rebuild season_dataset.csv, pp_features.csv, defensive_dataset.csv,
      linemate_features.csv from whatever raw MoneyPuck exports are sitting
      in raw_data/game_level/ and raw_data/line_level/ (drop a new season's
-     file in there beforehand to include it — see data_sources.py).
+     file in there beforehand to include it — see pipeline/data_sources.py).
   3. Delete the cached trained models so the app retrains on next launch.
 
-Usage:
+Usage (from the repo root):
     python refresh_and_retrain.py
 
 Then run `streamlit run app.py` once — it will notice the models are
@@ -23,38 +23,34 @@ import os
 import subprocess
 import sys
 
-# Must match CACHE_FILE / DEF_CACHE_FILE in model_utils.py
-MODEL_CACHE_FILES = [
-    "trained_models_forwards_v5.joblib",
-    "defensive_models.joblib",
-]
+from nhl_predictor.config import CACHE_FILE, DEF_CACHE_FILE
 
-# Order matters: lines.py reads season_dataset.csv, so combining_by_season.py
+# Order matters: linemates.py reads season_dataset.csv, so season_dataset.py
 # must run first. The rest are independent of each other.
 STEPS = [
-    ("Refreshing player ages",            ["fetch_player_ages.py"]),
-    ("Building season_dataset.csv",       ["combining_by_season.py"]),
-    ("Building pp_features.csv",          ["adding_Power_play.py"]),
-    ("Building defensive_dataset.csv",    ["defensive.py"]),
-    ("Building linemate_features.csv",    ["lines.py"]),
+    ("Refreshing player ages",         "pipeline/fetch_player_ages.py"),
+    ("Building season_dataset.csv",    "pipeline/season_dataset.py"),
+    ("Building pp_features.csv",       "pipeline/power_play.py"),
+    ("Building defensive_dataset.csv", "pipeline/defensive_dataset.py"),
+    ("Building linemate_features.csv", "pipeline/linemates.py"),
 ]
 
 
-def run_step(label, script_args):
+def run_step(label, script):
     print(f"\n{'=' * 70}\n{label}\n{'=' * 70}")
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    result = subprocess.run([sys.executable] + script_args, env=env)
+    result = subprocess.run([sys.executable, script], env=env)
     if result.returncode != 0:
         print(f"\n✗ {label} failed (exit code {result.returncode}) — stopping.")
         sys.exit(result.returncode)
 
 
 def main():
-    for label, script_args in STEPS:
-        run_step(label, script_args)
+    for label, script in STEPS:
+        run_step(label, script)
 
     print(f"\n{'=' * 70}\nClearing cached models so the app retrains\n{'=' * 70}")
-    for f in MODEL_CACHE_FILES:
+    for f in (CACHE_FILE, DEF_CACHE_FILE):
         if os.path.exists(f):
             os.remove(f)
             print(f"  Removed {f}")
