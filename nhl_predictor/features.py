@@ -57,6 +57,23 @@ def prior_max(s):
     return s.shift(1).cummax()
 
 
+def weighted_recent_mean(d, col, weight_col=None, weights=(3, 2, 1)):
+    """
+    3-2-1 weighted mean of this season and the two before it (per player),
+    optionally also weighted by `weight_col` (e.g. ice time) so short stints
+    count less. Includes the current season, so it is only a leakage-safe
+    input for the Next Season model. `d` must be sorted by player, season.
+    """
+    g = d.groupby("player_id", sort=False)
+    num = den = 0
+    for lag, w in enumerate(weights):
+        val = g[col].shift(lag)
+        wt  = w * (g[weight_col].shift(lag) if weight_col else 1.0) * val.notna()
+        num = num + (wt * val).fillna(0)
+        den = den + wt.fillna(0)
+    return pd.Series(np.where(den > 0, num / np.where(den > 0, den, 1), np.nan), index=d.index)
+
+
 def add_career_curve_features(df, curve_stats, peak_stats, pct_peak_stats, age_slope_pairs, prefix=""):
     """
     Non-linear career-arc features from per-player quadratic fits of stat vs

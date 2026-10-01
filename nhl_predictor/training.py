@@ -12,7 +12,6 @@ import joblib
 import numpy as np
 import streamlit as st
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import KFold
 
 from .config import CV_FOLDS, ELITE_QUANTILE
 
@@ -69,12 +68,16 @@ def train_residual_models(X, df, targets, target_col_map, *, labels, make_model,
                           baseline_fn, weight_fn, label_prefix, progress, track_elite=False):
     """
     For each target, fit `make_model()` on (target − baseline) with sample
-    weights, report CV-fold MAE/RMSE, then refit on all rows.
+    weights, report time-based CV MAE/RMSE, then refit on all rows.
+
+    CV is forward-chaining by season: each of the last CV_FOLDS seasons is
+    predicted by a model trained only on earlier seasons, so a player's
+    neighbouring seasons never leak between train and validation.
 
     baseline_fn(df, target) -> Series; weight_fn(y, target) -> array.
     Returns (models, metrics) where models[target] = {"global": model}.
     """
-    kf      = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=42)
+    folds   = season_folds(df["season"].values)
     models  = {}
     metrics = {}
 
@@ -87,7 +90,7 @@ def train_residual_models(X, df, targets, target_col_map, *, labels, make_model,
         elite_cut = np.quantile(y, ELITE_QUANTILE)
 
         fold_maes, fold_rmses, fold_elite_maes = [], [], []
-        for fold, (tr, val) in enumerate(kf.split(X), 1):
+        for fold, (tr, val) in enumerate(folds, 1):
             progress.status(f"🔁 **{label_prefix} — {label}** CV fold {fold}/{CV_FOLDS}")
             m = make_model()
             m.fit(X.iloc[tr], y_resid[tr], sample_weight=sample_w[tr])
@@ -115,6 +118,13 @@ def train_residual_models(X, df, targets, target_col_map, *, labels, make_model,
         progress.advance(f"{label_prefix} {label} done — MAE {np.mean(fold_maes):.3f}")
 
     return models, metrics
+
+
+def season_folds(seasons, n_folds=CV_FOLDS):
+    """[(train_idx, val_idx)] — train on seasons before s, validate on s, for the last n_folds seasons."""
+    seasons = np.asarray(seasons)
+    return [(np.flatnonzero(seasons < s), np.flatnonzero(seasons == s))
+            for s in np.unique(seasons)[-n_folds:]]
 
 
 def total_training_steps(n_targets):

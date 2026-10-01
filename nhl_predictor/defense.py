@@ -19,6 +19,7 @@ from .data_io import latest_known_age, load_ages, safe_read_csv
 from .features import (
     add_career_curve_features, compute_baseline, design_matrix,
     latest_team_contexts, per_player, prior_mean, prior_rolling_mean, prior_slope, safe_div,
+    weighted_recent_mean,
 )
 from .grading import classify_defenseman_type, grade_defensive_defenseman, grade_offensive_defenseman
 from .training import ModelBundle, StreamlitProgress, total_training_steps, train_residual_models
@@ -81,6 +82,10 @@ def engineer_career_history(df):
         d[f"recent_3yr_mean_{name}"]  = per_player(g, col, prior_rolling_mean)
         d[f"career_prev_mean_{name}"] = per_player(g, col, prior_mean)
         d[f"recent_3yr_{slope_name}_slope"] = per_player(g, col, lambda s: prior_slope(s, window=3))
+
+    # 3-2-1 weighted recent form, including this season (Next Season model only)
+    for col, (name, _) in _HISTORY_STATS.items():
+        d[f"wavg_{name}"] = weighted_recent_mean(d, col, weight_col="games_played")
 
     d["yoy_hits_delta"]      = g["ind_hits_pg"].diff()
     d["yoy_takeaways_delta"] = g["ind_takeaways_pg"].diff()

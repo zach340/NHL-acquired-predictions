@@ -15,7 +15,7 @@ from . import state
 
 
 def show_metrics(metrics, label, targets, labels, directions=None):
-    st.markdown(f"**{label} model quality ({CV_FOLDS}-fold CV)**")
+    st.markdown(f"**{label} model quality (season-based CV: each of the last {CV_FOLDS} seasons predicted from earlier seasons only)**")
     if directions is None:
         st.caption("MAE = avg absolute error in same units as stat. RMSE penalises large errors more. Lower is better.")
     for target in targets:

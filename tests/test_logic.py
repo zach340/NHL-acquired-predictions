@@ -22,6 +22,26 @@ def test_compute_baseline_takes_first_non_null_candidate():
     assert features.compute_baseline(df, ["a", "b", "missing"]).tolist() == [2.0, 1.0, 0.0]
 
 
+def test_weighted_recent_mean_is_3_2_1_within_each_player():
+    d = pd.DataFrame({"player_id": [1, 1, 1, 1, 2], "season": [2020, 2021, 2022, 2023, 2023],
+                      "x": [9.0, 1.0, 2.0, 3.0, 5.0], "toi": [1.0, 1.0, 1.0, 3.0, 1.0]})
+    out = features.weighted_recent_mean(d, "x")
+    assert out.iloc[1] == pytest.approx((3 * 1 + 2 * 9) / 5)        # only one prior season
+    assert out.iloc[3] == pytest.approx((3 * 3 + 2 * 2 + 1 * 1) / 6)  # 9.0 is outside the window
+    assert out.iloc[4] == 5.0                                          # player 2 doesn't see player 1
+    weighted = features.weighted_recent_mean(d, "x", weight_col="toi")
+    assert weighted.iloc[3] == pytest.approx((9 * 3 + 2 * 2 + 1 * 1) / (9 + 2 + 1))
+
+
+def test_season_folds_never_train_on_the_validation_season_or_later():
+    from nhl_predictor.training import season_folds
+    seasons = np.array([2020, 2021, 2022, 2023, 2021, 2023])
+    folds = season_folds(seasons, n_folds=2)
+    assert [sorted(set(seasons[v])) for _, v in folds] == [[2022], [2023]]
+    for tr, val in folds:
+        assert seasons[tr].max() < seasons[val].min()
+
+
 def test_latest_team_contexts_falls_back_for_missing_teams():
     df = pd.DataFrame({"season": [2023, 2024]})
     ctx = pd.DataFrame({"player_team": ["AAA", "AAA", "BBB"], "season": [2023, 2024, 2023], "x": [1, 2, 3]})

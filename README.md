@@ -56,8 +56,8 @@ pipeline/
 tests/                          # Unit tests for pure logic (python -m pytest tests)
 ```
 
-Trained models are cached as `trained_models_forwards_v5.joblib` and
-`defensive_models.joblib`; if they are missing the app trains on first launch.
+Trained models are cached as `trained_models_forwards_v6.joblib` and
+`defensive_models_v2.joblib`; if they are missing the app trains on first launch.
 
 ---
 
@@ -85,7 +85,7 @@ python -m streamlit run app.py     # opens http://localhost:8501
 ```
 
 The first launch trains both models (~5–10 min) and caches them as
-`trained_models_forwards_v5.joblib` / `defensive_models.joblib`; later
+`trained_models_forwards_v6.joblib` / `defensive_models_v2.joblib`; later
 launches load them in seconds. Delete those files (or use the retrain buttons
 on the **Models** tab) to retrain.
 

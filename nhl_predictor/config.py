@@ -14,8 +14,8 @@ LINEMATE_FILE  = "linemate_features.csv"
 DEF_FILE       = "defensive_dataset.csv"
 NAMES_FILE     = "player_names.csv"        # persistent NHL API name/headshot cache
 
-CACHE_FILE     = "trained_models_forwards_v5.joblib"
-DEF_CACHE_FILE = "defensive_models.joblib"
+CACHE_FILE     = "trained_models_forwards_v6.joblib"
+DEF_CACHE_FILE = "defensive_models_v2.joblib"
 
 # Shift pair data is cached on disk so it survives app restarts.
 # Each file: shifts_cache/{TEAM}_{N_GAMES}.json — refreshed when > TTL hours old.
@@ -118,8 +118,8 @@ TARGET_LABELS = {
     "goals_per_game":      "Goals / Game",
 }
 
-# Leakage-safe prior-season baselines. The model predicts the residual on top
-# of the first non-null candidate.
+# Team Fit (same-season) baselines: leakage-safe prior seasons only. The model
+# predicts the residual on top of the first non-null candidate.
 BASELINE_FEATURES = {
     "game_score_per_game": [
         "recent_3yr_mean_gamescore_pg",
@@ -211,8 +211,15 @@ TEAM_FEATURES = [
     "team_avg_line_corsi_pct",
 ]
 
-# Next-season model also uses trajectory (YoY delta) features
+# Next-season model also uses trajectory (YoY delta) features and the
+# 3-2-1 weighted recent means (which include the current season)
 TRAJECTORY_FEATURES = [
+    "wavg_points_pg",
+    "wavg_goals_pg",
+    "wavg_gamescore_pg",
+    "wavg_toi",
+    "wavg_p60",
+    "wavg_g60",
     "yoy_points_delta",
     "yoy_goals_delta",
     "yoy_gamescore_delta",
@@ -278,6 +285,13 @@ DEF_SCORE_WEIGHTS = {
     "pim_pg":               0.20,
 }
 
+# Forward Next Season baselines: 3-2-1 weighted mean of this season and the
+# two before it; Points/Goals as ice-time-weighted TOI/GP × rate/60.
+NEXT_BASELINE_RATES    = {"points_per_game": "wavg_p60", "goals_per_game": "wavg_g60"}
+NEXT_BASELINE_FEATURES = {"game_score_per_game": "wavg_gamescore_pg"}
+
+# Defensemen use prior seasons for both models (a 3-2-1 baseline tested worse
+# on the 2025-26 holdout; the 3-2-1 means help as Next Season features instead).
 DEF_BASELINE_FEATURES = {
     "ind_hits_pg":          ["prev_season_hits_pg",      "recent_3yr_mean_hits_pg",      "career_prev_mean_hits_pg"],
     "ind_takeaways_pg":     ["prev_season_takeaways_pg", "recent_3yr_mean_takeaways_pg", "career_prev_mean_takeaways_pg"],
@@ -355,6 +369,10 @@ DEF_TEAM_FEATURES = [
 ]
 
 DEF_TRAJECTORY_FEATURES = [
+    "wavg_hits_pg",
+    "wavg_takeaways_pg",
+    "wavg_xga_pg",
+    "wavg_pim_pg",
     "yoy_hits_delta",
     "yoy_takeaways_delta",
     "yoy_xga_delta",

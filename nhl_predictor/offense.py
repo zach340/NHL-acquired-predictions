@@ -12,7 +12,8 @@ import pandas as pd
 from . import nhl_api
 from .config import (
     AGE_FEATURES, AGES_FILE, BASELINE_FEATURES, ELITE_QUANTILE, FORWARD_POSITIONS,
-    FWD_SLOT_MAP, LINEMATE_FILE, MIN_GP, MIN_ICE, NONLINEAR_FEATURES, OUTCOME_FEATURES,
+    FWD_SLOT_MAP, LINEMATE_FILE, MIN_GP, MIN_ICE, NEXT_BASELINE_FEATURES, NEXT_BASELINE_RATES,
+    NONLINEAR_FEATURES, OUTCOME_FEATURES,
     PLAYER_FEATURES, POSITION_DUMMIES, PP_FILE, SLOT_COLORS, TARGET_LABELS, TARGETS,
     TEAM_FEATURES, TRAJECTORY_FEATURES, season_label,
 )
@@ -20,7 +21,7 @@ from .data_io import latest_known_age, load_ages, safe_read_csv
 from .features import (
     add_career_curve_features, compute_baseline, design_matrix,
     latest_team_contexts, per_player, prior_max, prior_mean, prior_rolling_mean,
-    prior_slope, safe_div,
+    prior_slope, safe_div, weighted_recent_mean,
 )
 from .training import (
     ModelBundle, StreamlitProgress, total_training_steps, train_residual_models,
@@ -97,6 +98,12 @@ def engineer_career_history_features(df):
         d[f"recent_3yr_{short}_slope"] = per_player(g, col, lambda s: prior_slope(s, window=3))
     for short, col in _HISTORY_STATS.items():
         d[f"career_{short}_slope"] = per_player(g, col, prior_slope)
+
+    # 3-2-1 weighted recent form, including this season (Next Season model only)
+    for short, col in _HISTORY_STATS.items():
+        d[f"wavg_{short}_pg"] = weighted_recent_mean(d, col)
+    for short, col in (("toi", "toi_per_game"), ("p60", "ind_points_per60"), ("g60", "ind_goals_per60")):
+        d[f"wavg_{short}"] = weighted_recent_mean(d, col, weight_col="ice_time")
     return d
 
 
@@ -183,8 +190,22 @@ def build_X(frame, has_age, next_season=False):
 
 
 def compute_target_baseline(df_like, target):
-    base = target[5:] if target.startswith("next_") else target
-    return compute_baseline(df_like, BASELINE_FEATURES.get(base, []))
+    """Team Fit baseline: prior seasons only."""
+    return compute_baseline(df_like, BASELINE_FEATURES.get(target, []))
+
+
+def compute_next_baseline(df_like, target):
+    """
+    Next Season baseline: 3-2-1 weighted recent form including this season.
+    Points/Goals are built as TOI/GP × rate/60 so ice-time changes and rate
+    changes are separated.
+    """
+    if target in NEXT_BASELINE_RATES:
+        cols = ["wavg_toi", NEXT_BASELINE_RATES[target]]
+        if not all(c in df_like.columns for c in cols):
+            return pd.Series(np.zeros(len(df_like)), index=df_like.index, dtype=float)
+        return (df_like[cols[0]] * df_like[cols[1]] / 60).fillna(0.0).astype(float)
+    return compute_baseline(df_like, [NEXT_BASELINE_FEATURES[target]])
 
 
 def make_elite_sample_weights(y, _target=None):
@@ -197,10 +218,12 @@ def make_elite_sample_weights(y, _target=None):
 
 
 def make_lgbm():
+    # Shallow, subsampled trees with min_child_samples=40, picked on season-based
+    # CV + the 2025-26 holdout (deeper, min_child_samples=2 trees overfit).
     return lgb.LGBMRegressor(
-        n_estimators=1000, max_depth=8, learning_rate=0.03,
-        subsample=0.9, colsample_bytree=0.9, min_child_samples=2,
-        reg_alpha=0.01, reg_lambda=0.01,
+        n_estimators=600, max_depth=5, num_leaves=24, learning_rate=0.03,
+        subsample=0.8, subsample_freq=1, colsample_bytree=0.8, min_child_samples=40,
+        reg_alpha=0.1, reg_lambda=1.0,
         objective="regression_l2", random_state=42, verbose=-1,
     )
 
@@ -255,7 +278,8 @@ def load_and_train(path, ages_path):
     df_next = build_next_season_dataset(df)
     X_next  = build_X(df_next, has_age, next_season=True)
     next_models, next_metrics = train_residual_models(
-        X_next, df_next, TARGETS, {t: f"next_{t}" for t in TARGETS}, label_prefix="Next Season", **common)
+        X_next, df_next, TARGETS, {t: f"next_{t}" for t in TARGETS}, label_prefix="Next Season",
+        **(common | {"baseline_fn": compute_next_baseline}))
 
     progress.finish("✅ All models trained and ready!")
     return ModelBundle(df, team_ctx, has_age, profiles,
@@ -287,8 +311,9 @@ def with_context(profile, team_row, league_env=None):
 def predict_frame(frame, models, has_age, next_season=False):
     """{target: array of predictions} for each row of `frame`."""
     X = build_X(frame, has_age, next_season)
+    baseline = compute_next_baseline if next_season else compute_target_baseline
     return {
-        target: np.clip(compute_target_baseline(frame, target).values + m["global"].predict(X), 0, None)
+        target: np.clip(baseline(frame, target).values + m["global"].predict(X), 0, None)
         for target, m in models.items()
     }
 
