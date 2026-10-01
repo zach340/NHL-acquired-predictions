@@ -20,5 +20,5 @@ __pycache__/
 *.pyc
 .env
 
-# Partial model-cache writes
+# Trained model caches (regenerated on first launch) and partial writes
 *.joblib.tmp
