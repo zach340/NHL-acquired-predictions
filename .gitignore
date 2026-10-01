@@ -19,3 +19,6 @@ refresh_and_retrain.log
 __pycache__/
 *.pyc
 .env
+
+# Partial model-cache writes
+*.joblib.tmp

@@ -37,7 +37,10 @@ def load_bundle(path):
 
 
 def save_bundle(bundle, path):
-    joblib.dump(tuple(bundle), path)
+    """Write atomically so a concurrent reader never sees a half-written cache."""
+    tmp = f"{path}.tmp"
+    joblib.dump(tuple(bundle), tmp)
+    os.replace(tmp, path)
 
 
 class StreamlitProgress:
