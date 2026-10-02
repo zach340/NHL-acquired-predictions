@@ -22,3 +22,6 @@ __pycache__/
 
 # Trained model caches (regenerated on first launch) and partial writes
 *.joblib.tmp
+
+# NHL API pipeline: default comparison output
+nhl_api_datasets/

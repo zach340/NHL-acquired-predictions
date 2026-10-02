@@ -163,3 +163,72 @@ def test_defensive_slope_features_are_produced_under_their_configured_names():
     slopes = [f for f in config.DEF_PLAYER_FEATURES if f.endswith("_slope")]
     assert slopes and all(f in out.columns for f in slopes)
     assert out["recent_3yr_hits_slope"].iloc[2] == pytest.approx(1.0)
+
+
+# ── NHL API pipeline ──────────────────────────────────────────────────────────
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipeline"))
+
+
+def _toy_shifts():
+    """Home team 1 (skaters 11-16, goalie 10), away team 2 (21-25, goalie 20); 16 replaces 15 at t=30."""
+    rows = [(10, 1, 0, 60, True), (20, 2, 0, 60, True)]
+    rows += [(p, 1, 0, 60, False) for p in (11, 12, 13, 14)] + [(15, 1, 0, 30, False), (16, 1, 30, 60, False)]
+    rows += [(p, 2, 0, 60, False) for p in (21, 22, 23, 24, 25)]
+    return pd.DataFrame(rows, columns=["player_id", "team_id", "start", "end", "is_goalie"])
+
+
+def test_segments_split_at_line_changes_and_events_land_on_the_right_side():
+    import nhl_api_parse as P
+    seg, _ = P.build_segments(_toy_shifts(), home_id=1, away_id=2)
+    assert seg[["start", "end"]].values.tolist() == [[0, 30], [30, 60]]
+    assert sorted(seg.loc[0, ["h1", "h2", "h3", "h4", "h5"]]) == [11, 12, 13, 14, 15]
+    assert sorted(seg.loc[1, ["h1", "h2", "h3", "h4", "h5"]]) == [11, 12, 13, 14, 16]
+    assert (seg["h_skaters"] == 5).all() and seg["h_goalie"].all() and seg["a_goalie"].all()
+    s, e = seg["start"].values, seg["end"].values
+    assert P._segment_index(s, e, 30) == 0                  # a goal at the change: outgoing players
+    assert P._segment_index(s, e, 30, faceoff=True) == 1    # a faceoff at the change: incoming players
+
+
+def test_flurry_adjustment_discounts_follow_up_shots():
+    import nhl_api_xg as X
+    s = pd.DataFrame({"game_id": 1, "team_id": [1, 1, 1], "period": 1, "t": [10, 12, 30],
+                      "event_id": [1, 2, 3], "xg": [0.3, 0.4, 0.2]})
+    out = X.flurry_adjust(s)
+    assert out.tolist() == pytest.approx([0.3, 0.4 * 0.7, 0.2])   # third shot starts a new sequence
+
+
+def test_unit_key_ignores_order():
+    import nhl_api_datasets as D
+    keys = D._unit_key(np.array([[3, 1, 2, 0, 0], [2, 3, 1, 0, 0], [1, 2, 4, 0, 0]]))
+    assert keys[0] == keys[1] != keys[2]
+
+
+def test_untracked_games_get_toi_split_by_tracked_shares():
+    import nhl_api_datasets as D
+    pg = pd.DataFrame({"player_id": [1, 1], "has_shifts": [True, False], "toi_all": [1000.0, 500.0],
+                       "toi_5v5": [800.0, np.nan], "toi_5v4": [100.0, np.nan], "toi_4v5": [50.0, np.nan]})
+    out = D.impute_strength_toi(pg)
+    assert out["toi_5v5"].tolist() == [800.0, 400.0]
+    assert out["toi_5v5_tracked"].tolist() == [800.0, 0.0]   # on-ice rates only use tracked time
+
+
+# ── models ────────────────────────────────────────────────────────────────────
+
+def test_blend_predicts_reports_importances_and_survives_a_cache_round_trip(tmp_path):
+    import joblib
+    from nhl_predictor import defense, offense
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(300, 4)), columns=list("abcd"))
+    y = 2 * X["a"] - X["b"] + rng.normal(scale=0.1, size=300)
+    for make in (offense.make_model, defense.make_model):
+        m = make().fit(X, y, sample_weight=np.ones(300))
+        imp = m.feature_importances_
+        assert imp.shape == (4,) and imp.sum() == pytest.approx(1.0) and imp[:2].sum() > imp[2:].sum()
+        joblib.dump(m, tmp_path / "m.joblib")
+        again = joblib.load(tmp_path / "m.joblib")
+        assert np.allclose(again.predict(X), m.predict(X))
+        assert np.corrcoef(m.predict(X), y)[0, 1] > 0.95

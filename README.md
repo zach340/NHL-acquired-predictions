@@ -17,7 +17,7 @@ Users can select a player and a destination team and receive a predicted statist
 ## Tech Stack
 
 - **Language:** Python
-- **ML Models:** scikit-learn, LightGBM (separate models for forwards and defensemen)
+- **ML Models:** CatBoost, LightGBM, scikit-learn ridge (separate blends for forwards and defensemen)
 - **Feature Engineering:** Per-60 rate normalization, power play context, linemate quality, shooting danger metrics
 - **App Framework:** Streamlit
 - **Deployment:** Streamlit Cloud (live link above)
@@ -52,21 +52,26 @@ pipeline/
   defensive_dataset.py          # → defensive_dataset.csv
   linemates.py                  # MoneyPuck lines → linemate_features.csv
   data_sources.py               # Reads every export in raw_data/
+  nhl_api_download.py           # NHL API alternative: raw play-by-play + shifts → raw_data/nhl_api/
+  nhl_api_parse.py              #   → shots / line-change segments / player-game tables
+  nhl_api_xg.py                 #   → own expected-goals model (cross-fitted by season)
+  nhl_api_datasets.py           #   → the same four CSVs as the MoneyPuck scripts
+  nhl_api_rapm.py               #   → regularised adjusted plus-minus (research; not used by the app)
   legacy/                       # One-off scripts from the original raw-data workflow
 tests/                          # Unit tests for pure logic (python -m pytest tests)
 ```
 
-Trained models are cached as `trained_models_forwards_v6.joblib` and
-`defensive_models_v2.joblib`; if they are missing the app trains on first launch.
+Trained models are cached as `trained_models_forwards_v7.joblib` and
+`defensive_models_v3.joblib`; if they are missing the app trains on first launch.
 
 ---
 
 ## Data Pipeline
 
-1. **Collection:** Historical NHL player statistics aggregated by season
+1. **Collection:** Every regular-season game's play-by-play and shift charts from the public NHL API (2010-11 on), with our own expected-goals model
 2. **Cleaning:** Duplicate removal, missing value handling, team name normalization
 3. **Feature Engineering:** Per-60 rate construction, power play usage, linemate context, shooting danger zones, player age curves
-4. **Modeling:** Separate LightGBM models trained for forwards and defensemen across multiple statistical targets
+4. **Modeling:** Separate model blends for forwards (CatBoost + ridge) and defensemen (LightGBM + CatBoost), each predicting how far a player will land above or below a recent-form baseline
 5. **Serving:** Streamlit interface surfaces predictions with feature importance context
 
 ---
@@ -84,8 +89,8 @@ pip install -r requirements.txt
 python -m streamlit run app.py     # opens http://localhost:8501
 ```
 
-The first launch trains both models (~5–10 min) and caches them as
-`trained_models_forwards_v6.joblib` / `defensive_models_v2.joblib`; later
+The first launch trains both models (~15 min) and caches them as
+`trained_models_forwards_v7.joblib` / `defensive_models_v3.joblib`; later
 launches load them in seconds. Delete those files (or use the retrain buttons
 on the **Models** tab) to retrain.
 
@@ -101,11 +106,18 @@ pip install pytest
 python -m pytest tests
 ```
 
-**Refreshing the data** (needs the raw MoneyPuck exports in `raw_data/game_level/`
-and `raw_data/line_level/` — see `pipeline/data_sources.py`):
+**Refreshing the data** straight from the NHL API (no manual downloads; the
+first run fetches every game since 2010-11 into `raw_data/nhl_api/` and takes
+~4-5 hours, later runs only fetch new games):
 ```bash
 python refresh_and_retrain.py      # rebuild every CSV, then clear the model caches
 python pipeline/fetch_player_ages.py   # ages only (also runs daily via GitHub Actions)
+```
+
+The original MoneyPuck pipeline still works (needs the raw exports in
+`raw_data/game_level/` and `raw_data/line_level/` — see `pipeline/data_sources.py`):
+```bash
+python refresh_and_retrain.py --source moneypuck
 ```
 
 Seasons are labelled by their start year throughout (2024 = the 2024-25 season).

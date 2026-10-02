@@ -22,6 +22,7 @@ from .features import (
     weighted_recent_mean,
 )
 from .grading import classify_defenseman_type, grade_defensive_defenseman, grade_offensive_defenseman
+from .models import BlendRegressor, make_catboost
 from .training import ModelBundle, StreamlitProgress, total_training_steps, train_residual_models
 
 # Source column → (history name, slope name), e.g. prev_season_hits_pg / recent_3yr_hits_slope
@@ -168,6 +169,16 @@ def make_lgbm():
     )
 
 
+def make_catboost_huber():
+    return make_catboost("Huber:delta=1.0")
+
+
+def make_model():
+    # LightGBM + CatBoost (both Huber): the only candidate at least as good as
+    # LightGBM alone on season-based CV and the 2025-26 holdout for every target.
+    return BlendRegressor([make_lgbm, make_catboost_huber])
+
+
 # ── Training ───────────────────────────────────────────────────────────────────
 
 def load_and_train(def_path, ages_path):
@@ -193,7 +204,7 @@ def load_and_train(def_path, ages_path):
     profiles = {pid: build_player_profile(group) for pid, group in df.groupby("player_id")}
     progress.advance(f"Profiles built — {len(profiles):,} defensemen")
 
-    common = dict(labels=DEF_TARGET_LABELS, make_model=make_lgbm, baseline_fn=compute_target_baseline,
+    common = dict(labels=DEF_TARGET_LABELS, make_model=make_model, baseline_fn=compute_target_baseline,
                   weight_fn=make_elite_sample_weights, progress=progress)
 
     progress.status("⚙️ **Training Current Fit models...**")

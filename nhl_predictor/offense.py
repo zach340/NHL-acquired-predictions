@@ -5,7 +5,6 @@ Forward (offensive) model: feature engineering, training and prediction of
 Game Score / Points / Goals per game on any of the 32 team contexts.
 """
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
@@ -23,6 +22,7 @@ from .features import (
     latest_team_contexts, per_player, prior_max, prior_mean, prior_rolling_mean,
     prior_slope, safe_div, weighted_recent_mean,
 )
+from .models import BlendRegressor, RidgeRegressor, make_catboost
 from .training import (
     ModelBundle, StreamlitProgress, total_training_steps, train_residual_models,
 )
@@ -217,15 +217,11 @@ def make_elite_sample_weights(y, _target=None):
     return weights
 
 
-def make_lgbm():
-    # Shallow, subsampled trees with min_child_samples=40, picked on season-based
-    # CV + the 2025-26 holdout (deeper, min_child_samples=2 trees overfit).
-    return lgb.LGBMRegressor(
-        n_estimators=600, max_depth=5, num_leaves=24, learning_rate=0.03,
-        subsample=0.8, subsample_freq=1, colsample_bytree=0.8, min_child_samples=40,
-        reg_alpha=0.1, reg_lambda=1.0,
-        objective="regression_l2", random_state=42, verbose=-1,
-    )
+def make_model():
+    # CatBoost + ridge blend: best of LightGBM, CatBoost, ExtraTrees, ridge and
+    # their blends on season-based CV and the 2025-26 holdout, on both the
+    # MoneyPuck and NHL API data.
+    return BlendRegressor([make_catboost, RidgeRegressor])
 
 
 # ── Training ───────────────────────────────────────────────────────────────────
@@ -266,7 +262,7 @@ def load_and_train(path, ages_path):
     profiles = {pid: build_player_profile(group) for pid, group in df.groupby("player_id")}
     progress.advance(f"Profiles built from latest seasons — {len(profiles):,} players")
 
-    common = dict(labels=TARGET_LABELS, make_model=make_lgbm, baseline_fn=compute_target_baseline,
+    common = dict(labels=TARGET_LABELS, make_model=make_model, baseline_fn=compute_target_baseline,
                   weight_fn=make_elite_sample_weights, progress=progress, track_elite=True)
 
     progress.status("⚙️ **Training Team Fit models...**")

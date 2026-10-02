@@ -14,8 +14,8 @@ LINEMATE_FILE  = "linemate_features.csv"
 DEF_FILE       = "defensive_dataset.csv"
 NAMES_FILE     = "player_names.csv"        # persistent NHL API name/headshot cache
 
-CACHE_FILE     = "trained_models_forwards_v6.joblib"
-DEF_CACHE_FILE = "defensive_models_v2.joblib"
+CACHE_FILE     = "trained_models_forwards_v7.joblib"
+DEF_CACHE_FILE = "defensive_models_v3.joblib"
 
 # Shift pair data is cached on disk so it survives app restarts.
 # Each file: shifts_cache/{TEAM}_{N_GAMES}.json — refreshed when > TTL hours old.
