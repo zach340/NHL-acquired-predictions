@@ -35,6 +35,8 @@ nhl_predictor/
   data_io.py                    # CSV loading, ages
   features.py                   # Shared feature-engineering helpers
   training.py                   # Residual-model CV training loop, ModelBundle cache
+  validation.py                 # Holdout comparison shared by the Validation tab and weekly snapshot
+  models.py                     # Model blends (CatBoost / LightGBM / ridge)
   offense.py                    # Forward model: features, training, team-fit predictions
   defense.py                    # Defenseman model: features, training, predictions
   grading.py                    # Percentile grades, D-man archetypes
@@ -47,17 +49,14 @@ nhl_predictor/
   ui/                           # One module per tab + shared components
 pipeline/
   fetch_player_ages.py          # Player ages from the NHL API (runs daily via GitHub Actions)
-  season_dataset.py             # MoneyPuck game-level → season_dataset.csv
-  power_play.py                 # → pp_features.csv
-  defensive_dataset.py          # → defensive_dataset.csv
-  linemates.py                  # MoneyPuck lines → linemate_features.csv
-  data_sources.py               # Reads every export in raw_data/
-  nhl_api_download.py           # NHL API alternative: raw play-by-play + shifts → raw_data/nhl_api/
+  nhl_api_download.py           # Raw play-by-play + shift charts → raw_data/nhl_api/
   nhl_api_parse.py              #   → shots / line-change segments / player-game tables
-  nhl_api_xg.py                 #   → own expected-goals model (cross-fitted by season)
-  nhl_api_datasets.py           #   → the same four CSVs as the MoneyPuck scripts
-  nhl_api_rapm.py               #   → regularised adjusted plus-minus (research; not used by the app)
-  legacy/                       # One-off scripts from the original raw-data workflow
+  nhl_api_xg.py                 #   → expected-goals model (cross-fitted by season)
+  nhl_api_datasets.py           #   → season_dataset / defensive_dataset / pp_features / linemate_features CSVs
+scripts/
+  validation_snapshot.py        # Weekly: saved models vs this season's NHL API stats → validation_history.csv
+  yearly_retrain.py / .bat      # Yearly: refresh data, retrain, log old vs new metrics (no commit)
+  daily_refresh_ages.bat        # Local copy of the daily ages refresh
 tests/                          # Unit tests for pure logic (python -m pytest tests)
 ```
 
@@ -114,13 +113,32 @@ python refresh_and_retrain.py      # rebuild every CSV, then clear the model cac
 python pipeline/fetch_player_ages.py   # ages only (also runs daily via GitHub Actions)
 ```
 
-The original MoneyPuck pipeline still works (needs the raw exports in
-`raw_data/game_level/` and `raw_data/line_level/` — see `pipeline/data_sources.py`):
-```bash
-python refresh_and_retrain.py --source moneypuck
-```
-
 Seasons are labelled by their start year throughout (2024 = the 2024-25 season).
+
+### Scheduled jobs
+
+**Weekly validation snapshot** — `.github/workflows/weekly-validation-snapshot.yml`
+runs every Monday: it loads the saved models (no retraining), compares them with
+the current season's NHL API stats exactly as the Validation tab does, and
+commits one row to `validation_history.csv`. It skips quietly until players have
+10+ games. The Validation tab charts this history. Run it by hand from the
+repo's **Actions** tab (*Run workflow*) or locally with
+`python scripts/validation_snapshot.py`.
+
+**Yearly retrain** — `scripts/yearly_retrain.bat` (Windows Task Scheduler, July):
+refreshes the data (only new or changed seasons are downloaded, parsed and
+xG-scored), retrains both models, saves the caches, and appends old vs new
+holdout and CV metrics to `yearly_retrain.log`. Nothing is committed: check the
+log's comparison tables (anything >5% worse is marked `<-- CHECK`), then commit
+the CSVs and `.joblib` files yourself. Register it once from PowerShell:
+```powershell
+$repo = "C:\Users\Zachc\OneDrive\Documents\GitHub\NHL-acquired-predictions"
+schtasks /Create /TN "NHL Predictor yearly retrain" /SC MONTHLY /M JUL /D 15 /ST 03:00 `
+  /TR "`"$repo\scripts\yearly_retrain.bat`""
+$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 6)
+Set-ScheduledTask -TaskName "NHL Predictor yearly retrain" -Settings $s
+```
 
 ---
 

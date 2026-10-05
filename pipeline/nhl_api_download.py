@@ -6,7 +6,8 @@ the public NHL API (2010-11 onward — the first season with shot coordinates
 and shift charts) into raw_data/nhl_api/<season>/<game_id>.json.gz.
 
 Resumable: games already on disk are skipped, so rerun it any time (e.g.
-during a season) to pick up newly finished games.
+during a season) to pick up newly finished games. Finished past seasons get a
+_complete marker and are skipped entirely on later runs.
 
     python pipeline/nhl_api_download.py                 # every season 2010 → current
     python pipeline/nhl_api_download.py 2023 2024       # just these seasons (start years)
@@ -35,6 +36,7 @@ BOX_URL     = "https://api-web.nhle.com/v1/gamecenter/{gid}/boxscore"
 WORKERS     = 4
 MIN_GAP     = float(os.environ.get("NHL_API_MIN_GAP", "0.6"))   # seconds between requests, all threads
 MAX_GAMES   = 1400          # 32 teams × 82 / 2 = 1312; stop well past it
+BATCH       = 100           # game numbers checked per batch, in order
 FINISHED    = {"OFF", "FINAL"}
 
 _session = requests.Session()
@@ -134,31 +136,56 @@ def backfill_boxscores(season):
         print(f"  {season}: added boxscores to {added} games without shift charts", flush=True)
 
 
+def _complete_marker(season):
+    return os.path.join(RAW_DIR, str(season), "_complete")
+
+
 def download_season(season):
-    gids = [int(f"{season}02{n:04d}") for n in range(1, MAX_GAMES + 1)]
-    todo = [g for g in gids if not os.path.exists(game_path(season, g))]
-    have = len(gids) - len(todo)
-    counts = {"saved": 0, "missing": 0, "unfinished": 0, "error": 0}
+    """
+    Fetch every finished game of `season` not yet on disk. Game numbers run
+    1, 2, 3, ... so batches go in order and stop at the first game number that
+    doesn't exist, or a batch where nothing has been played yet (a postponed
+    game alone doesn't stop it). Returns the outcome counts.
+    """
+    counts = {"saved": 0, "missing": 0, "unfinished": 0, "error": 0, "on_disk": 0}
     t0 = time.time()
     with ThreadPoolExecutor(WORKERS) as pool:
-        futures = {pool.submit(fetch_game, season, g): g for g in todo}
-        for i, fut in enumerate(as_completed(futures), 1):
-            try:
-                counts[fut.result()] += 1
-            except Exception as e:  # keep going; a rerun retries it
-                counts["error"] += 1
-                print(f"  {futures[fut]}: {e}", flush=True)
-            if i % 200 == 0:
-                print(f"  {season}: {i}/{len(todo)} checked, {counts['saved']} saved "
+        for first in range(1, MAX_GAMES + 1, BATCH):
+            gids = [int(f"{season}02{n:04d}") for n in range(first, min(first + BATCH, MAX_GAMES + 1))]
+            todo = [g for g in gids if not os.path.exists(game_path(season, g))]
+            counts["on_disk"] += len(gids) - len(todo)
+            futures = {pool.submit(fetch_game, season, g): g for g in todo}
+            batch = {"saved": 0, "missing": 0, "unfinished": 0, "error": 0}
+            for fut in as_completed(futures):
+                try:
+                    batch[fut.result()] += 1
+                except Exception as e:  # keep going; a rerun retries it
+                    batch["error"] += 1
+                    print(f"  {futures[fut]}: {e}", flush=True)
+            for k, v in batch.items():
+                counts[k] += v
+            if batch["missing"] or (todo and batch["unfinished"] == len(todo)):
+                break
+            if todo:
+                print(f"  {season}: through game {gids[-1] % 10000}, {counts['saved']} saved "
                       f"({time.time() - t0:.0f}s)", flush=True)
-    print(f"{season}-{(season + 1) % 100:02d}: {have + counts['saved']} games on disk "
-          f"(+{counts['saved']} new, {counts['unfinished']} unfinished, {counts['error']} errors)", flush=True)
+    print(f"{season}-{(season + 1) % 100:02d}: {counts['on_disk'] + counts['saved']} games on disk "
+          f"(+{counts['saved']} new, {counts['unfinished']} not played yet, {counts['error']} errors)", flush=True)
+    return counts
 
 
 def main(seasons):
+    current = int(str(CURRENT_SEASON)[:4])
     for season in seasons:
-        download_season(season)
-        backfill_boxscores(season)
+        if os.path.exists(_complete_marker(season)):
+            print(f"{season}-{(season + 1) % 100:02d}: complete, skipped", flush=True)
+            continue
+        counts = download_season(season)
+        if counts["on_disk"] + counts["saved"]:
+            backfill_boxscores(season)
+        # A past season with every game final and nothing failed never changes again
+        if season < current and not counts["unfinished"] and not counts["error"] and counts["on_disk"] + counts["saved"]:
+            open(_complete_marker(season), "w").close()
 
 
 if __name__ == "__main__":

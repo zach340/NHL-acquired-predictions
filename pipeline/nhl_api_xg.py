@@ -12,9 +12,15 @@ Expected-goals model trained on the parsed NHL API shots
 xG is cross-fitted by season: each season is scored by a model that never saw
 it, so a season's xG never contains its own goals.
 
-    python pipeline/nhl_api_xg.py
+Incremental by default: only shots files without xG (seasons that are new or
+were just re-parsed) are scored, by one model trained on every other season.
+The first run, or --full, refits all seasons with 4 season-group folds.
+
+    python pipeline/nhl_api_xg.py           # score new / re-parsed seasons only
+    python pipeline/nhl_api_xg.py --full    # refit and rescore every season
 """
 
+import argparse
 import glob
 import os
 import sys
@@ -22,6 +28,7 @@ import sys
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from sklearn.metrics import log_loss, roc_auc_score
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -110,36 +117,59 @@ def danger_labels(s):
                              np.where(s["xg"] >= DANGER_CUTS[0], "medium", "low")))
 
 
-def main():
-    s = load_shots()
-    mask = trainable(s)
-    X, y = features(s), s["is_goal"].astype(int)
-    print(f"{mask.sum():,} unblocked attempts across {s['season'].nunique()} seasons; goal rate {y[mask].mean():.3%}")
+def needs_xg(path):
+    return "xg" not in pq.read_schema(path).names
 
-    s["xg"] = 0.0
-    folds = fold_ids(s)
-    for k in range(N_FOLDS):
-        tr, te = mask & (folds != k), mask & (folds == k)
-        m = make_model().fit(X[tr], y[tr])
-        p = m.predict_proba(X[te])[:, 1]
-        s.loc[te, "xg"] = p
-        print(f"  fold {k} (seasons {sorted(s.loc[te, 'season'].unique())}): log loss {log_loss(y[te], p):.4f}  AUC {roc_auc_score(y[te], p):.4f}  "
-              f"xG/goals {p.sum() / y[te].sum():.3f}", flush=True)
 
-    te = mask
-    p, yy = s.loc[te, "xg"], y[te]
+def report(p, yy):
     base = np.full(len(yy), yy.mean())
     print(f"overall: log loss {log_loss(yy, p):.4f} (no-skill {log_loss(yy, base):.4f})  AUC {roc_auc_score(yy, p):.4f}")
     dec = pd.qcut(p, 10, labels=False, duplicates="drop")
     print("calibration by decile (predicted vs actual goal rate):")
     print(pd.DataFrame({"pred": p.groupby(dec).mean(), "actual": yy.groupby(dec).mean()}).round(4).to_string())
 
-    s["xg_flurry"] = flurry_adjust(s)
-    s["danger"] = danger_labels(s)
-    for path, part in s.groupby("_path"):
-        part.drop(columns="_path").to_parquet(path, index=False)
-    print("xG written to every shots.parquet")
+
+def main(full=False):
+    paths = sorted(glob.glob(os.path.join(PARSED_DIR, "*", "shots.parquet")))
+    todo_paths = paths if full else [p for p in paths if needs_xg(p)]
+    if not todo_paths:
+        print("xG already up to date for every season")
+        return
+
+    s = load_shots()
+    mask = trainable(s)
+    X, y = features(s), s["is_goal"].astype(int)
+    todo = s["_path"].isin(todo_paths)
+    refit_all = len(todo_paths) == len(paths)
+    print(f"{mask.sum():,} unblocked attempts across {s['season'].nunique()} seasons; goal rate {y[mask].mean():.3%}")
+    print(f"scoring {len(todo_paths)} of {len(paths)} seasons"
+          + (" (4-fold refit)" if refit_all else " with a model trained on the others"), flush=True)
+
+    s.loc[todo, "xg"] = 0.0
+    if refit_all:
+        folds = fold_ids(s)
+        for k in range(N_FOLDS):
+            tr, te = mask & (folds != k), mask & (folds == k)
+            m = make_model().fit(X[tr], y[tr])
+            p = m.predict_proba(X[te])[:, 1]
+            s.loc[te, "xg"] = p
+            print(f"  fold {k} (seasons {sorted(s.loc[te, 'season'].unique())}): log loss {log_loss(y[te], p):.4f}  "
+                  f"AUC {roc_auc_score(y[te], p):.4f}  xG/goals {p.sum() / y[te].sum():.3f}", flush=True)
+    else:
+        tr, te = mask & ~todo, mask & todo
+        m = make_model().fit(X[tr], y[tr])
+        s.loc[te, "xg"] = m.predict_proba(X[te])[:, 1]
+    report(s.loc[mask & todo, "xg"], y[mask & todo])
+
+    part = s[todo].copy()
+    part["xg_flurry"] = flurry_adjust(part)
+    part["danger"] = danger_labels(part)
+    for path, rows in part.groupby("_path"):
+        rows.drop(columns="_path").to_parquet(path, index=False)
+    print(f"xG written to {len(todo_paths)} shots file(s)")
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--full", action="store_true", help="refit and rescore every season")
+    main(ap.parse_args().full)

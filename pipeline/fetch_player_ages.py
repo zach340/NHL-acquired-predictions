@@ -22,9 +22,9 @@ from datetime import date, datetime
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-# Seasons are labelled by START year to match MoneyPuck (2024 = 2024-25).
+# Seasons are labelled by START year (2024 = 2024-25).
 
-FIRST_SEASON_START = 2008
+FIRST_SEASON_START = 2010   # first season of the NHL API training data
 # New-season rosters appear after the draft / free agency, so roll over in July
 CURRENT_SEASON_START = date.today().year if date.today().month >= 7 else date.today().year - 1
 
@@ -59,7 +59,7 @@ def fetch_skater_bios(season: str) -> pd.DataFrame:
 
 
 def season_str_to_year(season_str: str) -> int:
-    """Convert '20232024' -> 2023 (start year, the season label used by MoneyPuck)."""
+    """Convert '20232024' -> 2023 (start year, the season label used in the data)."""
     return int(season_str[:4])
 
 

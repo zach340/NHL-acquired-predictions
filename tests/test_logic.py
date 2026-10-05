@@ -232,3 +232,45 @@ def test_blend_predicts_reports_importances_and_survives_a_cache_round_trip(tmp_
         again = joblib.load(tmp_path / "m.joblib")
         assert np.allclose(again.predict(X), m.predict(X))
         assert np.corrcoef(m.predict(X), y)[0, 1] > 0.95
+
+
+# ── scheduled jobs ────────────────────────────────────────────────────────────
+
+def test_validation_history_appends_and_replaces_same_day_reruns(tmp_path):
+    from nhl_predictor import validation
+    path = tmp_path / "history.csv"
+    row = {"date": "2026-11-16", "season": "2026-27", "fwd_matched": 300, "points_mae": 0.12, "goals_mae": 0.07,
+           "def_matched": 150, "hits_mae": 0.3, "takeaways_mae": 0.1, "pim_mae": 0.2}
+    validation.append_history(row, path)
+    validation.append_history(row | {"date": "2026-11-23", "points_mae": 0.11}, path)
+    hist = validation.append_history(row | {"points_mae": 0.13}, path)      # re-run of the first Monday
+    assert hist["date"].tolist() == ["2026-11-16", "2026-11-23"]
+    assert hist["points_mae"].tolist() == [0.13, 0.11]
+    assert list(hist.columns) == validation.HISTORY_COLS
+
+
+def test_parse_manifest_notices_new_or_rewritten_games(tmp_path):
+    import json
+    import time
+    import nhl_api_parse as P
+    raw = [tmp_path / f"g{i}.json.gz" for i in range(2)]
+    for f in raw:
+        f.write_text("x")
+    out = tmp_path / "parsed"
+    out.mkdir()
+    for name in P.OUTPUTS:
+        (out / name).write_text("x")
+    sig = P._raw_signature([str(f) for f in raw])
+    (out / "_manifest.json").write_text(json.dumps(sig))
+    assert P._up_to_date(str(out), P._raw_signature([str(f) for f in raw]))
+    time.sleep(0.05)
+    raw[0].write_text("rewritten")                                        # e.g. boxscore backfill
+    assert not P._up_to_date(str(out), P._raw_signature([str(f) for f in raw]))
+    assert not P._up_to_date(str(out), P._raw_signature([str(raw[0])]))   # game count changed
+
+
+def test_xg_step_only_targets_files_without_xg(tmp_path):
+    import nhl_api_xg as X
+    pd.DataFrame({"a": [1]}).to_parquet(tmp_path / "new.parquet")
+    pd.DataFrame({"a": [1], "xg": [0.1]}).to_parquet(tmp_path / "done.parquet")
+    assert X.needs_xg(str(tmp_path / "new.parquet")) and not X.needs_xg(str(tmp_path / "done.parquet"))

@@ -13,6 +13,7 @@ PP_FILE        = "pp_features.csv"
 LINEMATE_FILE  = "linemate_features.csv"
 DEF_FILE       = "defensive_dataset.csv"
 NAMES_FILE     = "player_names.csv"        # persistent NHL API name/headshot cache
+VALIDATION_HISTORY_FILE = "validation_history.csv"   # weekly snapshots (scripts/validation_snapshot.py)
 
 CACHE_FILE     = "trained_models_forwards_v7.joblib"
 DEF_CACHE_FILE = "defensive_models_v3.joblib"
@@ -23,8 +24,8 @@ SHIFTS_CACHE_DIR   = "shifts_cache"
 SHIFTS_CACHE_TTL_H = 6
 
 # ── Season ─────────────────────────────────────────────────────────────────────
-# Seasons are labelled by their START year everywhere in the data (MoneyPuck
-# convention): 2024 = the 2024-25 season. The NHL API uses "20242025" ids.
+# Seasons are labelled by their START year everywhere in the data:
+# 2024 = the 2024-25 season. The NHL API uses "20242025" ids.
 
 def season_id(start_year):
     """2024 -> '20242025' (NHL API season id)."""
@@ -45,7 +46,6 @@ def _current_season_start(today=None):
 
 CURRENT_SEASON_START = _current_season_start()
 CURRENT_SEASON       = season_id(CURRENT_SEASON_START)   # rosters, shift charts, bios
-FIRST_SEASON_START   = 2008                              # first MoneyPuck season
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
@@ -408,6 +408,5 @@ SLOT_COLORS = {
 
 # 3 forwards per line (C, LW, RW) across 4 lines = 12 forwards
 FWD_SLOT_MAP = {rank: f"{('1st', '2nd', '3rd', '4th')[(rank - 1) // 3]} Line" for rank in range(1, 13)}
-DEF_SLOT_MAP = {rank: f"{('1st', '2nd', '3rd')[(rank - 1) // 2]} Pair" for rank in range(1, 7)}
 
 PAIR_SLOT_NAMES = ["1st Pair", "2nd Pair", "3rd Pair", "4th Pair"]

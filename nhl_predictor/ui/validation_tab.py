@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import mean_absolute_error
 
-from .. import charts, defense, nhl_api, offense
+from .. import charts, defense, nhl_api, offense, validation
 from ..config import ELITE_QUANTILE, season_id, season_label
 from .components import csv_download
 
@@ -38,6 +38,17 @@ def _misses_and_best(val_df, error_col, cols, title_suffix=""):
     st.dataframe(val_df.reindex(ranked.nsmallest(15).index)[cols], width="stretch")
 
 
+def _render_history(metrics, title):
+    """Weekly MAE snapshots (validation_history.csv, written by scripts/validation_snapshot.py)."""
+    hist = validation.load_history()
+    hist = hist.dropna(subset=[col for col, _ in metrics], how="all")
+    if hist.empty:
+        st.caption("Accuracy history: no weekly snapshots yet — a GitHub Action adds one every Monday "
+                   "once players reach 10 games.")
+        return
+    st.plotly_chart(charts.validation_history_chart(hist, metrics, title), width="stretch")
+
+
 def _render_offensive(fwd, season):
     label = season_label(season)
     st.subheader(f"{label} Offensive Validation")
@@ -47,6 +58,8 @@ def _render_offensive(fwd, season):
     if st.button("Refresh NHL API stats"):
         st.cache_data.clear()
         st.rerun()
+    _render_history([("points_mae", "Points/GP MAE"), ("goals_mae", "Goals/GP MAE")],
+                    "Forward accuracy over time (weekly snapshots)")
 
     actual_df, err = nhl_api.fetch_season_skaters(season_id(season))
     if err:
@@ -106,6 +119,8 @@ def _render_defensive(dfn, season):
                f"compared with their actual {label} regular-season hits, takeaways and PIM per game.")
     if st.button("Refresh defensive stats"):
         nhl_api.fetch_defensive_stats.clear()
+    _render_history([("hits_mae", "Hits/GP MAE"), ("takeaways_mae", "Takeaways/GP MAE"), ("pim_mae", "PIM/GP MAE")],
+                    "Defenseman accuracy over time (weekly snapshots)")
 
     if dfn is None:
         st.warning("Defensive model not loaded.")
@@ -134,7 +149,8 @@ def _render_defensive(dfn, season):
     if has_pim:
         cols[2].metric("PIM/GP MAE",   _mae(val_df, "actual_pim_pg",  "pred_pim_pg"))
     cols[3].metric("Defensemen matched", f"{len(val_df):,}")
-    st.caption("PIM/GP: actual = penaltyMinutes/GP from NHL API, predicted = ind_penalty_minutes_pg from MoneyPuck.")
+    st.caption("PIM/GP: actual = penaltyMinutes/GP from the NHL API stats reports; the model is trained on "
+               "PIM/GP built from NHL API play-by-play.")
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     fig.patch.set_facecolor(charts.BG)
@@ -144,7 +160,7 @@ def _render_defensive(dfn, season):
         charts.scatter(val_df, "actual_pim_pg", "pred_pim_pg", "PIM / Game", axes[1][0])
     else:
         charts.blank_panel(axes[1][0], "PIM / Game", "PIM data not available\nfrom NHL API")
-    charts.blank_panel(axes[1][1], "xGA Against / 60", "xGA validation requires\nMoneyPuck current season data")
+    charts.blank_panel(axes[1][1], "xGA Against / 60", "xGA validation not shown\n(needs on-ice xG for the season)")
     plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)

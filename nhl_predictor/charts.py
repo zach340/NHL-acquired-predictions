@@ -131,3 +131,25 @@ def elite_segment_stats(val_df, actual_col, pred_col, quantile=0.90):
         return np.nan, np.nan, 0
     return (float(mean_absolute_error(seg[actual_col], seg[pred_col])),
             float((seg[pred_col] - seg[actual_col]).mean()), int(len(seg)))
+
+
+HISTORY_COLORS = ["#4a90d9", "#e6a817", "#57a85a"]
+
+
+def validation_history_chart(hist, metrics, title):
+    """MAE over time from validation_history.csv: one line per (column, label) in `metrics`."""
+    fig = go.Figure()
+    for (col, label), color in zip(metrics, HISTORY_COLORS):
+        fig.add_trace(go.Scatter(
+            x=hist["date"], y=hist[col], name=label, mode="lines+markers",
+            line=dict(color=color, width=2), customdata=hist["season"],
+            hovertemplate=f"{label}: %{{y:.3f}}<br>%{{x}} (%{{customdata}})<extra></extra>",
+        ))
+    fig.update_layout(
+        title=dict(text=title, font=dict(color="white", size=14)),
+        paper_bgcolor=BG, plot_bgcolor=BG, height=320, font=dict(color="white"),
+        margin=dict(l=50, r=20, t=50, b=40), legend=dict(orientation="h", y=-0.2),
+        yaxis=dict(title="MAE (per game)", gridcolor=GRID, zerolinecolor=GRID),
+        xaxis=dict(gridcolor=GRID),
+    )
+    return fig

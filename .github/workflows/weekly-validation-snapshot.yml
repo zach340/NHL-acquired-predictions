@@ -1,0 +1,49 @@
+name: Weekly validation snapshot
+
+on:
+  schedule:
+    # Mondays 12:00 UTC (7:00 AM Central Daylight / 6:00 AM Central Standard)
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The saved models and CSVs are Git LFS objects; only fetch what the snapshot reads
+      - name: Pull models and data from Git LFS
+        run: |
+          git lfs install --local
+          git lfs pull --include="*.joblib,*.csv"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compare saved models with this season's NHL API stats
+        run: python scripts/validation_snapshot.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ ! -f validation_history.csv ]; then
+            echo "No snapshot yet (no players with 10+ games)"
+            exit 0
+          fi
+          git add validation_history.csv
+          if git diff --cached --quiet; then
+            echo "No changes to validation_history.csv"
+          else
+            git commit -m "Weekly validation snapshot"
+            git push
+          fi

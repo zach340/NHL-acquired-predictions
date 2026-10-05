@@ -9,19 +9,25 @@ tables under raw_data/nhl_api_parsed/<season>/:
                         on-ice segment it happened in
   segments.parquet      the game cut into stretches with no line change: start,
                         end, skaters on ice per team (h1..h6 / a1..a6), goalie
-                        flags and score — used for TOI by strength, on-ice
-                        stats and RAPM
+                        flags and score — used for TOI by strength and
+                        on-ice stats
   player_games.parquet  per player per game: TOI (all / 5v5 / 5v4 / 4v5),
                         shifts, hits, takeaways, giveaways, penalties,
                         faceoffs, blocks and zone starts
 
 Shootouts are dropped. All times are seconds from the start of the game.
 
-    python pipeline/nhl_api_parse.py              # every downloaded season
+    python pipeline/nhl_api_parse.py              # every downloaded season that changed
     python pipeline/nhl_api_parse.py 2023 2024    # just these seasons
+    python pipeline/nhl_api_parse.py --force      # re-parse everything
+
+Seasons whose raw games haven't changed since the last parse are skipped
+(tracked in each parsed folder's _manifest.json).
 """
 
+import argparse
 import glob
+import json
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -289,10 +295,31 @@ def parse_game(path):
     return pd.DataFrame(shots), seg, pg
 
 
-def parse_season(season, workers=None):
+OUTPUTS = ("shots.parquet", "segments.parquet", "player_games.parquet")
+
+
+def _raw_signature(files):
+    """Game count + newest file time: changes whenever a game is added or rewritten (e.g. boxscore backfill)."""
+    return {"games": len(files), "newest": max(os.path.getmtime(f) for f in files)}
+
+
+def _up_to_date(out, signature):
+    manifest = os.path.join(out, "_manifest.json")
+    if not all(os.path.exists(os.path.join(out, f)) for f in OUTPUTS) or not os.path.exists(manifest):
+        return False
+    with open(manifest) as f:
+        return json.load(f) == signature
+
+
+def parse_season(season, workers=None, force=False):
     files = sorted(glob.glob(os.path.join(RAW_DIR, str(season), "*.json.gz")))
     if not files:
         print(f"{season}: no games downloaded")
+        return
+    out = os.path.join(PARSED_DIR, str(season))
+    signature = _raw_signature(files)
+    if not force and _up_to_date(out, signature):
+        print(f"{season}-{(season + 1) % 100:02d}: unchanged, skipped", flush=True)
         return
     shots, segs, pgs, bad = [], [], [], 0
     with ProcessPoolExecutor(workers) as pool:
@@ -303,7 +330,6 @@ def parse_season(season, workers=None):
                 continue
             s, sg, pg = res
             shots.append(s); segs.append(sg); pgs.append(pg)
-    out = os.path.join(PARSED_DIR, str(season))
     os.makedirs(out, exist_ok=True)
     shots = pd.concat(shots, ignore_index=True)
     pgs = pd.concat(pgs, ignore_index=True)
@@ -311,6 +337,8 @@ def parse_season(season, workers=None):
     shots.to_parquet(os.path.join(out, "shots.parquet"), index=False)
     segs.to_parquet(os.path.join(out, "segments.parquet"), index=False)
     pgs.to_parquet(os.path.join(out, "player_games.parquet"), index=False)
+    with open(os.path.join(out, "_manifest.json"), "w") as f:
+        json.dump(signature, f)
     no_shifts = (~pgs.groupby("game_id")["has_shifts"].first()).sum()
     print(f"{season}-{(season + 1) % 100:02d}: {len(files) - bad} games, {len(shots):,} shot attempts, "
           f"{len(pgs):,} player-games, {no_shifts} games without shift data, {bad} failed", flush=True)
@@ -324,6 +352,9 @@ def _safe_parse(path):
 
 
 if __name__ == "__main__":
-    seasons = [int(a) for a in sys.argv[1:]] or sorted(int(d) for d in os.listdir(RAW_DIR) if d.isdigit())
-    for s in seasons:
-        parse_season(s)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seasons", nargs="*", type=int, help="start years (default: every downloaded season)")
+    ap.add_argument("--force", action="store_true", help="re-parse even if the raw games haven't changed")
+    a = ap.parse_args()
+    for s in a.seasons or sorted(int(d) for d in os.listdir(RAW_DIR) if d.isdigit()):
+        parse_season(s, force=a.force)
